@@ -33,6 +33,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{45298B81
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FarmTogether2.ModKit.Tool", "tools\FarmTogether2.ModKit.Tool\FarmTogether2.ModKit.Tool.csproj", "{F58F48FE-7DD4-44F3-BCB1-7C88E41B4BF3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FarmTogether2.CompatibilityVerifier", "tools\FarmTogether2.CompatibilityVerifier\FarmTogether2.CompatibilityVerifier.csproj", "{5B58432C-E0CC-46DC-BB9A-451BEE685D51}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -86,6 +88,10 @@ Global
 		{F58F48FE-7DD4-44F3-BCB1-7C88E41B4BF3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F58F48FE-7DD4-44F3-BCB1-7C88E41B4BF3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F58F48FE-7DD4-44F3-BCB1-7C88E41B4BF3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5B58432C-E0CC-46DC-BB9A-451BEE685D51}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5B58432C-E0CC-46DC-BB9A-451BEE685D51}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5B58432C-E0CC-46DC-BB9A-451BEE685D51}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5B58432C-E0CC-46DC-BB9A-451BEE685D51}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{8367AEB0-4F78-49DA-9E7C-34EE118E405F} = {DA4D4FBE-3FD2-427E-BA01-DF919E340B04}
@@ -100,5 +106,6 @@ Global
 		{D72CEF45-D52A-4CD9-A005-2ADC9A34B39E} = {AE703004-29AE-43F4-98CA-C62EDBF8ADC9}
 		{7C5C38C3-9A2A-4BFF-9B80-E30DA2B7DA5D} = {B720C8AF-0C01-4F0D-8068-B13EA7777EF6}
 		{F58F48FE-7DD4-44F3-BCB1-7C88E41B4BF3} = {45298B81-EA60-45C0-81E0-70FB885740E5}
+		{5B58432C-E0CC-46DC-BB9A-451BEE685D51} = {45298B81-EA60-45C0-81E0-70FB885740E5}
 	EndGlobalSection
 EndGlobal

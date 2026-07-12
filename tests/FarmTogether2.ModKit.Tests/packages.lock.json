@@ -162,6 +162,13 @@
           "xunit.extensibility.core": "[2.9.3]"
         }
       },
+      "farmtogether2.compatibilityverifier": {
+        "type": "Project",
+        "dependencies": {
+          "FarmTogether2.ContractModel": "[1.0.0, )",
+          "Mono.Cecil": "[0.11.6, )"
+        }
+      },
       "farmtogether2.contractmodel": {
         "type": "Project"
       }
