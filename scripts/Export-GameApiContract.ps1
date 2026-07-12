@@ -74,8 +74,8 @@ function Assert-ExactProperties {
         [Parameter(Mandatory)][string] $Context
     )
 
-    if ($null -eq $Value) {
-        throw "$Context is null."
+    if ($null -eq $Value -or $Value -isnot [pscustomobject]) {
+        throw "$Context must be a JSON object."
     }
 
     [string[]] $actual = @($Value.PSObject.Properties.Name)
@@ -101,11 +101,63 @@ function Read-ClosedJson {
     }
 
     try {
+        $documentOptions = [Text.Json.JsonDocumentOptions]::new()
+        $documentOptions.AllowTrailingCommas = $false
+        $documentOptions.CommentHandling = [Text.Json.JsonCommentHandling]::Disallow
+        $document = [Text.Json.JsonDocument]::Parse($raw, $documentOptions)
+        try {
+            Assert-NoDuplicateJsonProperties $document.RootElement $Context
+        }
+        finally {
+            $document.Dispose()
+        }
         return $raw | ConvertFrom-Json -Depth 100
     }
     catch {
         throw "$Context is not valid JSON: $($_.Exception.Message)"
     }
+}
+
+function Assert-NoDuplicateJsonProperties {
+    param(
+        [Parameter(Mandatory)][Text.Json.JsonElement] $Element,
+        [Parameter(Mandatory)][string] $Context
+    )
+
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) {
+                throw "$Context contains duplicate JSON property '$($property.Name)'."
+            }
+            Assert-NoDuplicateJsonProperties $property.Value "$Context.$($property.Name)"
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-NoDuplicateJsonProperties $item "$Context[$index]"
+            $index++
+        }
+    }
+}
+
+function Assert-JsonInteger {
+    param($Value, [Parameter(Mandatory)][string] $Context)
+    if ($Value -isnot [long]) { throw "$Context must be a JSON integer." }
+}
+
+function Assert-JsonString {
+    param($Value, [Parameter(Mandatory)][string] $Context, [switch] $AllowEmpty)
+    if ($Value -isnot [string] -or (-not $AllowEmpty -and [string]::IsNullOrWhiteSpace($Value))) {
+        $suffix = if ($AllowEmpty) { '' } else { ' containing a value' }
+        throw "$Context must be a JSON string$suffix."
+    }
+}
+
+function Assert-JsonArray {
+    param($Value, [Parameter(Mandatory)][string] $Context)
+    if ($Value -isnot [object[]]) { throw "$Context must be a JSON array." }
 }
 
 function Write-JsonAtomically {
@@ -197,6 +249,42 @@ function ConvertTo-ContractTypeName {
     return ([string]$Type.FullName).Replace('/', '.').Replace('+', '.')
 }
 
+function Get-GenericParameterSignature {
+    param([Parameter(Mandatory)] $Parameter)
+
+    [string[]] $constraints = @(Get-OrdinalSortedStrings @(
+        $Parameter.Constraints | ForEach-Object { ConvertTo-ContractTypeName $_.ConstraintType }
+    ))
+    return "$($Parameter.Position):$($Parameter.Name):$([int]$Parameter.Attributes):$([string]::Join(',', $constraints))"
+}
+
+function Get-GenericParameterListSignature {
+    param([Parameter(Mandatory)] $Provider)
+
+    return [string]::Join(';', @($Provider.GenericParameters | ForEach-Object { Get-GenericParameterSignature $_ }))
+}
+
+function Test-IsPubliclyVisibleType {
+    param([Parameter(Mandatory)] $Type)
+
+    if ($null -eq $Type.DeclaringType) { return [bool]$Type.IsPublic }
+    return [bool]($Type.IsNestedPublic -and (Test-IsPubliclyVisibleType $Type.DeclaringType))
+}
+
+function ConvertTo-CanonicalConstant {
+    param($Value)
+
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string]) {
+        return 'string:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+    }
+    if ($Value -is [char]) { return "char:$([int]$Value)" }
+    if ($Value -is [bool]) { return "bool:$($Value.ToString().ToLowerInvariant())" }
+    if ($Value -is [single]) { return 'single:' + [BitConverter]::SingleToInt32Bits($Value).ToString('x8', [Globalization.CultureInfo]::InvariantCulture) }
+    if ($Value -is [double]) { return 'double:' + [BitConverter]::DoubleToInt64Bits($Value).ToString('x16', [Globalization.CultureInfo]::InvariantCulture) }
+    return "$($Value.GetType().FullName):$([Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture))"
+}
+
 function Get-AllTypeDefinitions {
     param([Parameter(Mandatory)] $Module)
 
@@ -249,37 +337,41 @@ function Get-PublicMetadataFingerprint {
     $lines.Add("assembly`t$($identity.name)`t$($identity.version)`t$($identity.culture)`t$($identity.publicKeyToken)")
 
     foreach ($type in Get-AllTypeDefinitions $Assembly.MainModule) {
-        if (-not ($type.IsPublic -or $type.IsNestedPublic)) {
+        if (-not (Test-IsPubliclyVisibleType $type)) {
             continue
         }
 
         $kind = if ($type.IsEnum) { 'enum' } elseif ($type.IsInterface) { 'interface' } elseif ($type.IsValueType) { 'struct' } else { 'class' }
         $baseType = if ($null -eq $type.BaseType) { '' } else { ConvertTo-ContractTypeName $type.BaseType }
         $interfaces = @(Get-OrdinalSortedStrings @($type.Interfaces | ForEach-Object { ConvertTo-ContractTypeName $_.InterfaceType }))
-        $lines.Add("type`t$kind`t$(ConvertTo-ContractTypeName $type)`t$baseType`t$([string]::Join(',', $interfaces))")
+        $lines.Add("type`t$kind`t$(ConvertTo-ContractTypeName $type)`t$baseType`t$([string]::Join(',', $interfaces))`t$([int]$type.Attributes)`t$($type.PackingSize)`t$($type.ClassSize)`t$(Get-GenericParameterListSignature $type)")
 
         foreach ($field in $type.Fields) {
             if (-not $field.IsPublic) { continue }
-            $constant = if ($field.HasConstant) { [Convert]::ToString($field.Constant, [Globalization.CultureInfo]::InvariantCulture) } else { '' }
-            $lines.Add("field`t$(ConvertTo-ContractTypeName $type)`t$($field.IsStatic)`t$(ConvertTo-ContractTypeName $field.FieldType)`t$($field.Name)`t$constant")
+            $constant = if ($field.HasConstant) { ConvertTo-CanonicalConstant $field.Constant } else { '' }
+            $lines.Add("field`t$(ConvertTo-ContractTypeName $type)`t$([int]$field.Attributes)`t$(ConvertTo-ContractTypeName $field.FieldType)`t$($field.Name)`t$constant")
         }
         foreach ($method in $type.Methods) {
             if (-not $method.IsPublic) { continue }
-            $parameters = @($method.Parameters | ForEach-Object { ConvertTo-ContractTypeName $_.ParameterType })
-            $lines.Add("method`t$(ConvertTo-ContractTypeName $type)`t$($method.IsStatic)`t$(ConvertTo-ContractTypeName $method.ReturnType)`t$($method.Name)`t$($method.GenericParameters.Count)`t$([string]::Join(',', $parameters))")
+            $returnDefault = if ($method.MethodReturnType.HasConstant) { ConvertTo-CanonicalConstant $method.MethodReturnType.Constant } else { '' }
+            $parameters = @($method.Parameters | ForEach-Object {
+                $default = if ($_.HasConstant) { ConvertTo-CanonicalConstant $_.Constant } else { '' }
+                "$(ConvertTo-ContractTypeName $_.ParameterType):$([int]$_.Attributes):$default"
+            })
+            $lines.Add("method`t$(ConvertTo-ContractTypeName $type)`t$([int]$method.Attributes)`t$([int]$method.ImplAttributes)`t$(ConvertTo-ContractTypeName $method.ReturnType):$([int]$method.MethodReturnType.Attributes):$returnDefault`t$($method.Name)`t$(Get-GenericParameterListSignature $method)`t$([string]::Join(',', $parameters))")
         }
         foreach ($property in $type.Properties) {
             $accessors = @(@($property.GetMethod, $property.SetMethod) | Where-Object { $null -ne $_ -and $_.IsPublic })
             if ($accessors.Count -eq 0) { continue }
             $parameters = @($property.Parameters | ForEach-Object { ConvertTo-ContractTypeName $_.ParameterType })
             $isStatic = @($accessors | Where-Object IsStatic).Count -ne 0
-            $lines.Add("property`t$(ConvertTo-ContractTypeName $type)`t$isStatic`t$(ConvertTo-ContractTypeName $property.PropertyType)`t$($property.Name)`t$([string]::Join(',', $parameters))")
+            $lines.Add("property`t$(ConvertTo-ContractTypeName $type)`t$isStatic`t$([int]$property.Attributes)`t$(ConvertTo-ContractTypeName $property.PropertyType)`t$($property.Name)`t$([string]::Join(',', $parameters))")
         }
-        foreach ($event in $type.Events) {
-            $accessors = @(@($event.AddMethod, $event.RemoveMethod) | Where-Object { $null -ne $_ -and $_.IsPublic })
+        foreach ($eventDefinition in $type.Events) {
+            $accessors = @(@($eventDefinition.AddMethod, $eventDefinition.RemoveMethod) | Where-Object { $null -ne $_ -and $_.IsPublic })
             if ($accessors.Count -eq 0) { continue }
             $isStatic = @($accessors | Where-Object IsStatic).Count -ne 0
-            $lines.Add("event`t$(ConvertTo-ContractTypeName $type)`t$isStatic`t$(ConvertTo-ContractTypeName $event.EventType)`t$($event.Name)")
+            $lines.Add("event`t$(ConvertTo-ContractTypeName $type)`t$isStatic`t$([int]$eventDefinition.Attributes)`t$(ConvertTo-ContractTypeName $eventDefinition.EventType)`t$($eventDefinition.Name)")
         }
     }
 
@@ -333,6 +425,10 @@ function Read-ValidatedSnapshot {
 
     $snapshot = Read-ClosedJson $Path $Context
     Assert-ExactProperties $snapshot @('schemaVersion', 'steamBuildId', 'aggregateSha256', 'assemblyMetadataSha256', 'assemblies') $Context
+    Assert-JsonInteger $snapshot.schemaVersion "$Context schemaVersion"
+    Assert-JsonString $snapshot.steamBuildId "$Context steamBuildId"
+    Assert-JsonString $snapshot.aggregateSha256 "$Context aggregateSha256"
+    Assert-JsonArray $snapshot.assemblies "$Context assemblies"
     if ($snapshot.schemaVersion -ne 1) { throw "$Context has unsupported schemaVersion '$($snapshot.schemaVersion)'." }
     if ([string]$snapshot.steamBuildId -cnotmatch '^\d+$') { throw "$Context has an invalid steamBuildId." }
     Assert-Fingerprint ([string]$snapshot.aggregateSha256) "$Context aggregateSha256"
@@ -340,7 +436,9 @@ function Read-ValidatedSnapshot {
 
     $hashes = [ordered]@{}
     foreach ($name in $script:ApprovedAssemblies.Keys) {
-        $value = [string]$snapshot.assemblyMetadataSha256.PSObject.Properties[$name].Value
+        $rawValue = $snapshot.assemblyMetadataSha256.PSObject.Properties[$name].Value
+        Assert-JsonString $rawValue "$Context assemblyMetadataSha256.$name"
+        $value = [string]$rawValue
         Assert-Fingerprint $value "$Context assemblyMetadataSha256.$name"
         $hashes[$name] = $value
     }
@@ -355,6 +453,10 @@ function Read-ValidatedSnapshot {
     $identityByName = @{}
     foreach ($identity in @($snapshot.assemblies)) {
         Assert-ExactProperties $identity @('name', 'version', 'culture', 'publicKeyToken') "$Context assembly identity"
+        Assert-JsonString $identity.name "$Context assembly identity name"
+        Assert-JsonString $identity.version "$Context assembly identity version"
+        Assert-JsonString $identity.culture "$Context assembly identity culture" -AllowEmpty
+        Assert-JsonString $identity.publicKeyToken "$Context assembly identity publicKeyToken" -AllowEmpty
         $name = [string]$identity.name
         if (-not $script:ApprovedAssemblies.Contains($name) -or $identityByName.ContainsKey($name)) {
             throw "$Context contains a duplicate or unknown assembly identity '$name'."
@@ -370,6 +472,15 @@ function Read-ValidatedSnapshot {
     }
 
     return $snapshot
+}
+
+function Get-AssemblyIdentitySetSignature {
+    param([Parameter(Mandatory)] $Snapshot)
+
+    [string[]] $lines = @($Snapshot.assemblies | ForEach-Object {
+        "$($_.name)`t$($_.version)`t$($_.culture)`t$($_.publicKeyToken)"
+    })
+    return [string]::Join("`n", (Get-OrdinalSortedStrings $lines))
 }
 
 function Assert-SnapshotMatchesInterop {
@@ -421,9 +532,7 @@ function New-SupportedBuildsObject {
         if ($modToBuild.Values -cnotcontains $buildId) { throw "Build '$buildId' is not selected by any mod." }
     }
 
-    $identity0 = @($snapshots[0].assemblies | ConvertTo-Json -Depth 10 -Compress)
-    $identity1 = @($snapshots[1].assemblies | ConvertTo-Json -Depth 10 -Compress)
-    if ([string]$identity0 -cne [string]$identity1) {
+    if ((Get-AssemblyIdentitySetSignature $snapshots[0]) -cne (Get-AssemblyIdentitySetSignature $snapshots[1])) {
         throw 'Build snapshots have different assembly identities.'
     }
 
@@ -466,6 +575,8 @@ function Read-ValidatedSupportedBuilds {
 
     $supported = Read-ClosedJson $Path 'Supported builds'
     Assert-ExactProperties $supported @('schemaVersion', 'mods', 'builds', 'assemblies') 'Supported builds'
+    Assert-JsonInteger $supported.schemaVersion 'Supported builds schemaVersion'
+    Assert-JsonArray $supported.assemblies 'Supported builds assemblies'
     if ($supported.schemaVersion -ne 1) { throw 'Supported builds has an unsupported schemaVersion.' }
 
     [string[]] $modIds = @($script:ApprovedPlugins.Values | ForEach-Object { $_.modId })
@@ -473,6 +584,7 @@ function Read-ValidatedSupportedBuilds {
     foreach ($modId in $modIds) {
         $entry = $supported.mods.PSObject.Properties[$modId].Value
         Assert-ExactProperties $entry @('steamBuildId') "Supported builds mod '$modId'"
+        Assert-JsonString $entry.steamBuildId "Supported builds mod '$modId' steamBuildId"
         if ([string]$entry.steamBuildId -cnotmatch '^\d+$') { throw "Supported builds mod '$modId' has an invalid Steam build ID." }
     }
 
@@ -484,11 +596,14 @@ function Read-ValidatedSupportedBuilds {
         if ($build -cnotmatch '^\d+$') { throw "Supported builds contains invalid build ID '$build'." }
         $entry = $supported.builds.PSObject.Properties[$build].Value
         Assert-ExactProperties $entry @('aggregateSha256', 'assemblyMetadataSha256') "Supported build '$build'"
+        Assert-JsonString $entry.aggregateSha256 "Supported build '$build' aggregateSha256"
         Assert-Fingerprint ([string]$entry.aggregateSha256) "Supported build '$build' aggregateSha256"
         Assert-ExactProperties $entry.assemblyMetadataSha256 @($script:ApprovedAssemblies.Keys) "Supported build '$build' hashes"
         $hashes = [ordered]@{}
         foreach ($name in $script:ApprovedAssemblies.Keys) {
-            $hash = [string]$entry.assemblyMetadataSha256.PSObject.Properties[$name].Value
+            $rawHash = $entry.assemblyMetadataSha256.PSObject.Properties[$name].Value
+            Assert-JsonString $rawHash "Supported build '$build' hash '$name'"
+            $hash = [string]$rawHash
             Assert-Fingerprint $hash "Supported build '$build' hash '$name'"
             $hashes[$name] = $hash
         }
@@ -499,11 +614,20 @@ function Read-ValidatedSupportedBuilds {
         $build = [string]$supported.mods.PSObject.Properties[$modId].Value.steamBuildId
         if ($buildNames -cnotcontains $build) { throw "Supported mod '$modId' refers to missing build '$build'." }
     }
+    foreach ($build in $buildNames) {
+        if (@($modIds | Where-Object { [string]$supported.mods.PSObject.Properties[$_].Value.steamBuildId -ceq $build }).Count -eq 0) {
+            throw "Supported build '$build' is not selected by any mod."
+        }
+    }
 
     if (@($supported.assemblies).Count -ne $script:ApprovedAssemblies.Count) { throw 'Supported builds must list seven assembly identities.' }
     $seen = @{}
     foreach ($identity in @($supported.assemblies)) {
         Assert-ExactProperties $identity @('name', 'version', 'culture', 'publicKeyToken') 'Supported assembly identity'
+        Assert-JsonString $identity.name 'Supported assembly identity name'
+        Assert-JsonString $identity.version 'Supported assembly identity version'
+        Assert-JsonString $identity.culture 'Supported assembly identity culture' -AllowEmpty
+        Assert-JsonString $identity.publicKeyToken 'Supported assembly identity publicKeyToken' -AllowEmpty
         $name = [string]$identity.name
         if (-not $script:ApprovedAssemblies.Contains($name) -or $seen.ContainsKey($name)) { throw "Supported builds contains duplicate or unknown assembly '$name'." }
         if ([string]$identity.version -cne $script:ApprovedAssemblies[$name] -or [string]$identity.culture -cne '' -or [string]$identity.publicKeyToken -cne '') {
@@ -609,9 +733,9 @@ function Find-PropertyForAccessor {
     if ($Method.Name -notmatch '^(get|set)_(?<name>.+)$') { return $null }
     $name = $Matches.name
     $indexCount = if ($Method.Name.StartsWith('set_', [StringComparison]::Ordinal)) { $Method.Parameters.Count - 1 } else { $Method.Parameters.Count }
-    $matches = @($Type.Properties | Where-Object { $_.Name -ceq $name -and $_.Parameters.Count -eq $indexCount })
-    if ($matches.Count -gt 1) { throw "Accessor '$($Type.FullName)::$($Method.Name)' maps to multiple properties." }
-    if ($matches.Count -eq 1) { return $matches[0] }
+    $matchingProperties = @($Type.Properties | Where-Object { $_.Name -ceq $name -and $_.Parameters.Count -eq $indexCount })
+    if ($matchingProperties.Count -gt 1) { throw "Accessor '$($Type.FullName)::$($Method.Name)' maps to multiple properties." }
+    if ($matchingProperties.Count -eq 1) { return $matchingProperties[0] }
     return $null
 }
 
@@ -659,34 +783,80 @@ function ConvertTo-SemanticMember {
     throw "Unsupported Cecil member reference '$($Member.GetType().FullName)'."
 }
 
-function Get-CallBodies {
-    param([Parameter(Mandatory)][string] $Text, [Parameter(Mandatory)][string] $Name)
+function Get-CSharpCodeMask {
+    param([Parameter(Mandatory)][string] $Text)
 
-    $result = [Collections.Generic.List[string]]::new()
-    $matches = [regex]::Matches($Text, "(?<![A-Za-z0-9_])$([regex]::Escape($Name))\s*\(")
-    foreach ($match in $matches) {
+    [bool[]] $mask = [bool[]]::new($Text.Length)
+    $state = 'code'
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        $next = if ($index + 1 -lt $Text.Length) { $Text[$index + 1] } else { [char]0 }
+        switch ($state) {
+            'code' {
+                if ($character -eq '/' -and $next -eq '/') { $state = 'line-comment'; $index++; continue }
+                if ($character -eq '/' -and $next -eq '*') { $state = 'block-comment'; $index++; continue }
+                if ($character -eq '@' -and $next -eq '"') { $mask[$index] = $true; $state = 'verbatim-string'; $index++; continue }
+                if ($character -eq '"') { $state = 'string'; continue }
+                if ($character -eq "'") { $state = 'char'; continue }
+                $mask[$index] = $true
+            }
+            'line-comment' {
+                if ($character -eq "`n") { $state = 'code'; $mask[$index] = $true }
+            }
+            'block-comment' {
+                if ($character -eq '*' -and $next -eq '/') { $state = 'code'; $index++ }
+            }
+            'string' {
+                if ($character -eq '\') { $index++; continue }
+                if ($character -eq '"') { $state = 'code' }
+            }
+            'verbatim-string' {
+                if ($character -eq '"' -and $next -eq '"') { $index++; continue }
+                if ($character -eq '"') { $state = 'code' }
+            }
+            'char' {
+                if ($character -eq '\') { $index++; continue }
+                if ($character -eq "'") { $state = 'code' }
+            }
+        }
+    }
+    if ($state -in @('block-comment', 'string', 'verbatim-string', 'char')) {
+        throw "Runtime source ends inside an unterminated $state."
+    }
+    return ,$mask
+}
+
+function Get-CallBodies {
+    param(
+        [Parameter(Mandatory)][string] $Text,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][bool[]] $CodeMask
+    )
+
+    $result = [Collections.Generic.List[object]]::new()
+    $invocationMatches = [regex]::Matches($Text, "(?<![A-Za-z0-9_])$([regex]::Escape($Name))\s*\(")
+    foreach ($match in $invocationMatches) {
+        if (-not $CodeMask[$match.Index]) { continue }
         $open = $Text.IndexOf('(', $match.Index)
         $depth = 1
-        $inString = $false
-        $inChar = $false
-        $escaped = $false
+        $close = -1
         for ($i = $open + 1; $i -lt $Text.Length; $i++) {
+            if (-not $CodeMask[$i]) { continue }
             $character = $Text[$i]
-            if ($escaped) { $escaped = $false; continue }
-            if (($inString -or $inChar) -and $character -eq '\') { $escaped = $true; continue }
-            if (-not $inChar -and $character -eq '"') { $inString = -not $inString; continue }
-            if (-not $inString -and $character -eq "'") { $inChar = -not $inChar; continue }
-            if ($inString -or $inChar) { continue }
             if ($character -eq '(') { $depth++; continue }
             if ($character -eq ')') {
                 $depth--
                 if ($depth -eq 0) {
-                    $result.Add($Text.Substring($open + 1, $i - $open - 1))
+                    $close = $i
                     break
                 }
             }
         }
         if ($depth -ne 0) { throw "Unbalanced invocation of '$Name' in runtime source." }
+        $nextCode = $close + 1
+        while ($nextCode -lt $Text.Length -and (-not $CodeMask[$nextCode] -or [char]::IsWhiteSpace($Text[$nextCode]))) { $nextCode++ }
+        $isDeclaration = $nextCode -lt $Text.Length -and $Text[$nextCode] -eq '{'
+        $result.Add([pscustomobject]@{ Body = $Text.Substring($open + 1, $close - $open - 1); IsDeclaration = $isDeclaration })
     }
     return $result.ToArray()
 }
@@ -754,13 +924,21 @@ function Resolve-RuntimeTargets {
         [Parameter(Mandatory)] $Targets
     )
 
+    [bool[]] $codeMask = Get-CSharpCodeMask $Text
     foreach ($helper in @('PatchPrefix', 'PatchPostfix', 'PatchBoth', 'PatchPrefixByTypeName')) {
-        foreach ($body in Get-CallBodies $Text $helper) {
+        foreach ($call in Get-CallBodies $Text $helper $codeMask) {
+            $body = $call.Body
             if ($helper -eq 'PatchPrefixByTypeName') {
-                if ($body -cnotmatch '^\s*"(?<type>[^"]+)"\s*,\s*"(?<member>[^"]+)"') { continue }
+                if ($body -cnotmatch '^\s*"(?<type>[^"]+)"\s*,\s*"(?<member>[^"]+)"') {
+                    if ($call.IsDeclaration) { continue }
+                    throw "Unrecognized invocation of '$helper' in $PluginName."
+                }
             }
             else {
-                if ($body -cnotmatch '^\s*typeof\s*\(\s*(?<type>[^\)]+)\s*\)\s*,\s*"(?<member>[^"]+)"') { continue }
+                if ($body -cnotmatch '^\s*typeof\s*\(\s*(?<type>[^\)]+)\s*\)\s*,\s*"(?<member>[^"]+)"') {
+                    if ($call.IsDeclaration) { continue }
+                    throw "Unrecognized invocation of '$helper' in $PluginName."
+                }
             }
             $sourceType = $Matches.type.Trim()
             $memberName = $Matches.member
@@ -798,6 +976,7 @@ function Resolve-RuntimeTargets {
 
     $reflectionPattern = '(?<helper>FloatMember|NumericMember)\.Resolve\s*\(\s*typeof\s*\(\s*(?<type>[^\)]+)\s*\)\s*,\s*"(?<member>[^"]+)"\s*\)'
     foreach ($match in [regex]::Matches($Text, $reflectionPattern)) {
+        if (-not $codeMask[$match.Index]) { continue }
         $sourceType = $match.Groups['type'].Value.Trim()
         $memberName = $match.Groups['member'].Value
         $type = Resolve-ContextType $Context 'Assembly-CSharp' $sourceType "Reflection target type '$sourceType' in $PluginName"
@@ -841,9 +1020,10 @@ function Export-Contract {
     $supportedPath = if ([string]::IsNullOrWhiteSpace($SupportedBuildsPath)) { Join-Path $PSScriptRoot '../contracts/supported-builds.json' } else { $SupportedBuildsPath }
     $supported = Read-ValidatedSupportedBuilds $supportedPath
 
-    $map = Read-ClosedJson $InteropMapPath 'Interop map'
-    Assert-ExactProperties $map @('schemaVersion', 'plugins') 'Interop map'
-    if ($map.schemaVersion -ne 1) { throw 'Interop map has an unsupported schemaVersion.' }
+        $map = Read-ClosedJson $InteropMapPath 'Interop map'
+        Assert-ExactProperties $map @('schemaVersion', 'plugins') 'Interop map'
+        Assert-JsonInteger $map.schemaVersion 'Interop map schemaVersion'
+        if ($map.schemaVersion -ne 1) { throw 'Interop map has an unsupported schemaVersion.' }
     Assert-ExactProperties $map.plugins @($script:ApprovedPlugins.Keys) 'Interop map plugins'
 
     $mapEntries = @{}
@@ -852,6 +1032,9 @@ function Export-Contract {
         foreach ($pluginName in $script:ApprovedPlugins.Keys) {
             $entry = $map.plugins.PSObject.Properties[$pluginName].Value
             Assert-ExactProperties $entry @('modId', 'steamBuildId', 'interopDirectory') "Interop map plugin '$pluginName'"
+            Assert-JsonString $entry.modId "Interop map plugin '$pluginName' modId"
+            Assert-JsonString $entry.steamBuildId "Interop map plugin '$pluginName' steamBuildId"
+            Assert-JsonString $entry.interopDirectory "Interop map plugin '$pluginName' interopDirectory"
             $approved = $script:ApprovedPlugins[$pluginName]
             if ([string]$entry.modId -cne $approved.modId) { throw "Interop map has the wrong mod ID for '$pluginName'." }
             $buildId = [string]$entry.steamBuildId
@@ -886,9 +1069,9 @@ function Export-Contract {
             $path = [IO.Path]::GetFullPath($sourceValue)
             if (-not [IO.File]::Exists($path) -or [IO.Path]::GetFileName($path) -cne 'Plugin.cs') { throw "Runtime source is not a Plugin.cs file: $path" }
             $directoryName = [IO.DirectoryInfo]::new([IO.Path]::GetDirectoryName($path)).Name
-            $matches = @($script:ApprovedPlugins.Keys | Where-Object { $script:ApprovedPlugins[$_].sourceDirectory -ceq $directoryName })
-            if ($matches.Count -ne 1 -or $sourceTexts.ContainsKey($matches[0])) { throw "Runtime source '$path' does not map uniquely to an approved plugin." }
-            $sourceTexts[$matches[0]] = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+            $matchingPlugins = @($script:ApprovedPlugins.Keys | Where-Object { $script:ApprovedPlugins[$_].sourceDirectory -ceq $directoryName })
+            if ($matchingPlugins.Count -ne 1 -or $sourceTexts.ContainsKey($matchingPlugins[0])) { throw "Runtime source '$path' does not map uniquely to an approved plugin." }
+            $sourceTexts[$matchingPlugins[0]] = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
         }
         if ($sourceTexts.Count -ne 4) { throw 'Exactly four approved Plugin.cs runtime sources are required.' }
 
@@ -958,9 +1141,9 @@ function Export-Contract {
             $context = $mapEntries[$targetPlugin].Context
             $type = Resolve-ContextType $context $target.Assembly $target.Type "Required runtime target '$($target.Type)'"
             if ($target.Kind -eq 'method') {
-                $matches = @($type.Methods | Where-Object { (ConvertTo-MethodSignature $_) -ceq $target.Signature })
-                if ($matches.Count -ne 1) { throw "Required runtime target '$($target.Signature)' no longer resolves uniquely." }
-                $member.isStatic = [bool]$matches[0].IsStatic
+                $matchingMethods = @($type.Methods | Where-Object { (ConvertTo-MethodSignature $_) -ceq $target.Signature })
+                if ($matchingMethods.Count -ne 1) { throw "Required runtime target '$($target.Signature)' no longer resolves uniquely." }
+                $member.isStatic = [bool]$matchingMethods[0].IsStatic
             }
             $key = "$($member.assembly)`u{1f}$($member.declaringType)`u{1f}$($member.signature)"
             if (-not $directMembers.ContainsKey($key)) { $directMembers[$key] = $member }
