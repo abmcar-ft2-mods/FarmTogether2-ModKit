@@ -11,6 +11,7 @@ public sealed class GameSwitchTests
 {
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
     private static readonly string SwitchScript = Path.Combine(Root, "scripts", "Switch-GameBuild.ps1");
+    private static readonly string CaptureScript = Path.Combine(Root, "scripts", "Capture-InteropSnapshots.ps1");
 
     public static TheoryData<string> ActivateOldCrashPoints => new()
     {
@@ -102,6 +103,37 @@ public sealed class GameSwitchTests
         { "restore-original-game-restored", "restore-current" },
         { "restore-original-save-pending", "restore-current" },
         { "restored", "restore-current" },
+    };
+
+    public static TheoryData<string, string> CaptureCrashPoints => new()
+    {
+        { "after-restore-pending-state", "old-active" },
+        { "after-archive-restored-state", "restored" },
+        { "after-activate-old", "none" },
+        { "after-wait-old", "none" },
+        { "after-create-old-preparing", "none" },
+        { "after-copy-old-Assembly-CSharp.dll", "none" },
+        { "after-copy-old-Il2Cppmscorlib.dll", "none" },
+        { "after-copy-old-MilkstoneUnityExtensions.dll", "none" },
+        { "after-copy-old-UnityEngine.CoreModule.dll", "none" },
+        { "after-copy-old-UnityEngine.IMGUIModule.dll", "none" },
+        { "after-copy-old-UnityEngine.InputLegacyModule.dll", "none" },
+        { "after-copy-old-UnityEngine.TextRenderingModule.dll", "none" },
+        { "after-fingerprint-old", "none" },
+        { "after-promote-old", "none" },
+        { "after-activate-current", "none" },
+        { "after-wait-current", "none" },
+        { "after-create-current-preparing", "none" },
+        { "after-copy-current-Assembly-CSharp.dll", "none" },
+        { "after-copy-current-Il2Cppmscorlib.dll", "none" },
+        { "after-copy-current-MilkstoneUnityExtensions.dll", "none" },
+        { "after-copy-current-UnityEngine.CoreModule.dll", "none" },
+        { "after-copy-current-UnityEngine.IMGUIModule.dll", "none" },
+        { "after-copy-current-UnityEngine.InputLegacyModule.dll", "none" },
+        { "after-copy-current-UnityEngine.TextRenderingModule.dll", "none" },
+        { "after-fingerprint-current", "none" },
+        { "after-promote-current", "none" },
+        { "after-write-supported-builds", "none" },
     };
 
     [Fact]
@@ -361,6 +393,153 @@ public sealed class GameSwitchTests
         Assert.Equal("restored", fixture.ReadState().GetProperty("phase").GetString());
     }
 
+    [Theory]
+    [MemberData(nameof(CaptureCrashPoints))]
+    public void CaptureRestoresAfterEveryOperationFailureThenRerunsToSuccess(string crashPoint, string priorState)
+    {
+        using Fixture fixture = new();
+        string? priorAttempt = fixture.PreparePriorCaptureState(priorState);
+
+        fixture.RunCapture(crashPoint).AssertFailure(crashPoint);
+        string? failedAttempt = File.Exists(fixture.State)
+            ? fixture.ReadState().GetProperty("attemptId").GetString()
+            : priorAttempt;
+        fixture.AssertOriginalTree();
+        if (File.Exists(fixture.State))
+        {
+            Assert.Equal("restored", fixture.ReadState().GetProperty("phase").GetString());
+        }
+        fixture.AssertNoPreparingDirectories();
+
+        fixture.RunCapture().AssertSuccess();
+        fixture.AssertOriginalTree();
+        if (File.Exists(fixture.State))
+        {
+            Assert.Equal("restored", fixture.ReadState().GetProperty("phase").GetString());
+        }
+        fixture.AssertNoPreparingDirectories();
+        Assert.NotNull(failedAttempt);
+        Assert.True(File.Exists(fixture.RestoredArchive(failedAttempt!)));
+        fixture.AssertCompletedSnapshot("23821227");
+        fixture.AssertCompletedSnapshot("24069957");
+        Assert.True(File.Exists(fixture.SupportedBuilds));
+    }
+
+    [Fact]
+    public void CompletedSnapshotsAreFullyRevalidatedAndSkipAnotherLaunch()
+    {
+        using Fixture fixture = new();
+        fixture.RunCapture().AssertSuccess();
+        Assert.Equal(new[] { "23821227", "24069957" }, File.ReadAllLines(fixture.WaitLog));
+
+        fixture.RunCapture().AssertSuccess();
+
+        Assert.Equal(new[] { "23821227", "24069957" }, File.ReadAllLines(fixture.WaitLog));
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+    }
+
+    [Fact]
+    public void HardCrashOwnedPreparingDirectoryIsRemovedBeforeRerun()
+    {
+        using Fixture fixture = new();
+        const string crashPoint = "after-copy-old-Assembly-CSharp.dll";
+
+        fixture.RunCaptureHardCrash(crashPoint).AssertExitCode(86);
+        Assert.NotEmpty(Directory.EnumerateDirectories(fixture.SnapshotRoot, "*.preparing", SearchOption.TopDirectoryOnly));
+
+        fixture.RunCapture().AssertSuccess();
+
+        fixture.AssertOriginalTree();
+        fixture.AssertNoPreparingDirectories();
+    }
+
+    [Fact]
+    public void CompletedSnapshotWithChangedDllIsRejectedBeforeAnotherSwitch()
+    {
+        using Fixture fixture = new();
+        fixture.RunCapture().AssertSuccess();
+        File.WriteAllText(Path.Combine(fixture.SnapshotRoot, "23821227", "Assembly-CSharp.dll"), "third snapshot hash");
+
+        fixture.RunCapture().AssertFailure("snapshot");
+
+        fixture.AssertOriginalTree();
+        Assert.False(File.Exists(fixture.State));
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("string-schema")]
+    public void CompletedSnapshotRejectsDuplicateOrWrongJsonTypes(string corruption)
+    {
+        using Fixture fixture = new();
+        fixture.RunCapture().AssertSuccess();
+        string snapshotPath = Path.Combine(fixture.SnapshotRoot, "23821227", "snapshot.json");
+        string json = File.ReadAllText(snapshotPath);
+        json = corruption switch
+        {
+            "duplicate" => json.Replace("{\"schemaVersion\":1,", "{\"schemaVersion\":1,\"schemaVersion\":1,", StringComparison.Ordinal),
+            "string-schema" => json.Replace("\"schemaVersion\":1", "\"schemaVersion\":\"1\"", StringComparison.Ordinal),
+            _ => throw new ArgumentOutOfRangeException(nameof(corruption), corruption, "Unknown corruption."),
+        };
+        File.WriteAllText(snapshotPath, json);
+
+        fixture.RunCapture().AssertFailure("snapshot");
+
+        fixture.AssertOriginalTree();
+        Assert.False(File.Exists(fixture.State));
+    }
+
+    [Theory]
+    [InlineData("state-equals-supported")]
+    [InlineData("supported-inside-snapshot")]
+    [InlineData("exporter-inside-canonical")]
+    [InlineData("supported-equals-exporter")]
+    [InlineData("state-equals-switch")]
+    [InlineData("snapshot-parent-link")]
+    [InlineData("supported-parent-link")]
+    public void CaptureRejectsConflictingOutputAndToolPathsBeforeGameMutation(string scenario)
+    {
+        using Fixture fixture = new();
+        byte[] switchBytes = File.ReadAllBytes(SwitchScript);
+        byte[] exporterBytes = File.ReadAllBytes(fixture.FakeExporter);
+
+        fixture.RunInvalidCaptureTopology(scenario).AssertFailure("topology");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+        Assert.Equal(switchBytes, File.ReadAllBytes(SwitchScript));
+        Assert.Equal(exporterBytes, File.ReadAllBytes(fixture.FakeExporter));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(fixture.DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public void CaptureRejectsNon64HexCurrentHashBeforeGameMutation()
+    {
+        using Fixture fixture = new();
+
+        fixture.RunCaptureWithInvalidNativeHash().AssertFailure("64-hex");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+        Assert.Empty(Directory.EnumerateFileSystemEntries(fixture.DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public void CaptureRejectsAnExistingRestoredArchiveWithoutMovingTheJournal()
+    {
+        using Fixture fixture = new();
+        fixture.PrepareCurrentActive();
+        fixture.RunSwitch("Restore").AssertSuccess();
+        string attempt = fixture.ReadState().GetProperty("attemptId").GetString()!;
+        File.WriteAllText(fixture.RestoredArchive(attempt), "occupied");
+
+        fixture.RunCapture().AssertFailure("ambiguity");
+
+        fixture.AssertRestored();
+        Assert.Equal("occupied", File.ReadAllText(fixture.RestoredArchive(attempt)));
+    }
+
     private static void AssertJsonSchema(JsonElement state)
     {
         string[] expected =
@@ -397,6 +576,11 @@ public sealed class GameSwitchTests
             OldDepot = Path.Combine(DirectoryPath, "old-depot");
             AppManifest = Path.Combine(DirectoryPath, "appmanifest_2418520.acf");
             State = Path.Combine(DirectoryPath, "game-switch.json");
+            SnapshotRoot = Path.Combine(DirectoryPath, "snapshots");
+            SupportedBuilds = Path.Combine(DirectoryPath, "supported-builds.json");
+            FakeExporter = Path.Combine(DirectoryPath, "fake-exporter.ps1");
+            CaptureDriver = Path.Combine(DirectoryPath, "capture-driver.ps1");
+            WaitLog = Path.Combine(DirectoryPath, "wait.log");
 
             CreateBuild(Canonical, "current");
             CreateBuild(OldDepot, "old");
@@ -415,6 +599,8 @@ public sealed class GameSwitchTests
             CurrentHashes = Hashes(Canonical);
             OldHashes = Hashes(OldDepot);
             CurrentHashArguments = CurrentHashes.Select(pair => $"{pair.Key}={pair.Value}").ToArray();
+            WriteFakeExporter();
+            WriteCaptureDriver();
         }
 
         public string DirectoryPath { get; }
@@ -423,6 +609,11 @@ public sealed class GameSwitchTests
         public string OldDepot { get; }
         public string AppManifest { get; }
         public string State { get; }
+        public string SnapshotRoot { get; }
+        public string SupportedBuilds { get; }
+        public string FakeExporter { get; }
+        public string CaptureDriver { get; }
+        public string WaitLog { get; }
         public IReadOnlyDictionary<string, string> CurrentHashes { get; }
         public IReadOnlyDictionary<string, string> OldHashes { get; }
         public IReadOnlyList<string> CurrentHashArguments { get; }
@@ -452,6 +643,67 @@ public sealed class GameSwitchTests
             string driver = Path.Combine(DirectoryPath, $"switch-driver-{Guid.NewGuid():N}.ps1");
             File.WriteAllText(driver, invocation.ToString());
             return RunPowerShell(new[] { "-File", driver }, "FARMT2_SWITCH_FAIL_AT", crashPoint);
+        }
+
+        public ProcessResult RunCapture(string? crashPoint = null) =>
+            RunPowerShell(new[] { "-File", CaptureDriver }, "FARMT2_CAPTURE_FAIL_AT", crashPoint);
+
+        public ProcessResult RunCaptureHardCrash(string crashPoint) =>
+            RunPowerShell(new[] { "-File", CaptureDriver }, "FARMT2_CAPTURE_HARD_CRASH_AT", crashPoint);
+
+        public ProcessResult RunCaptureWithInvalidNativeHash()
+        {
+            string original = CurrentHashArguments[0];
+            string invalid = original[..^1];
+            string body = File.ReadAllText(CaptureDriver).Replace(original, invalid, StringComparison.Ordinal);
+            string driver = Path.Combine(DirectoryPath, "invalid-hash-capture-driver.ps1");
+            File.WriteAllText(driver, body);
+            return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
+        }
+
+        public ProcessResult RunInvalidCaptureTopology(string scenario)
+        {
+            static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string body = File.ReadAllText(CaptureDriver);
+            switch (scenario)
+            {
+                case "state-equals-supported":
+                    body = body.Replace(Quote(SupportedBuilds), Quote(State), StringComparison.Ordinal);
+                    break;
+                case "supported-inside-snapshot":
+                    body = body.Replace(Quote(SupportedBuilds), Quote(Path.Combine(SnapshotRoot, "supported-builds.json")), StringComparison.Ordinal);
+                    break;
+                case "exporter-inside-canonical":
+                    string nestedExporter = Path.Combine(Canonical, "capture-exporter.ps1");
+                    File.Copy(FakeExporter, nestedExporter);
+                    body = body.Replace(Quote(FakeExporter), Quote(nestedExporter), StringComparison.Ordinal);
+                    break;
+                case "supported-equals-exporter":
+                    body = body.Replace(Quote(SupportedBuilds), Quote(FakeExporter), StringComparison.Ordinal);
+                    break;
+                case "state-equals-switch":
+                    body = body.Replace(Quote(State), Quote(SwitchScript), StringComparison.Ordinal);
+                    break;
+                case "snapshot-parent-link":
+                    string snapshotTarget = Path.Combine(DirectoryPath, "snapshot-link-target");
+                    string snapshotLink = Path.Combine(DirectoryPath, "snapshot-link");
+                    Directory.CreateDirectory(snapshotTarget);
+                    Directory.CreateSymbolicLink(snapshotLink, snapshotTarget);
+                    body = body.Replace(Quote(SnapshotRoot), Quote(Path.Combine(snapshotLink, "snapshots")), StringComparison.Ordinal);
+                    break;
+                case "supported-parent-link":
+                    string supportedTarget = Path.Combine(DirectoryPath, "supported-link-target");
+                    string supportedLink = Path.Combine(DirectoryPath, "supported-link");
+                    Directory.CreateDirectory(supportedTarget);
+                    Directory.CreateSymbolicLink(supportedLink, supportedTarget);
+                    body = body.Replace(Quote(SupportedBuilds), Quote(Path.Combine(supportedLink, "supported-builds.json")), StringComparison.Ordinal);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(scenario), scenario, "Unknown capture topology scenario.");
+            }
+            string driver = Path.Combine(DirectoryPath, $"invalid-capture-driver-{Guid.NewGuid():N}.ps1");
+            File.WriteAllText(driver, body);
+            return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
         }
 
         public ProcessResult RunInvalidTopology(string scenario, out string attemptedState)
@@ -539,6 +791,24 @@ public sealed class GameSwitchTests
             RunSwitch("ActivateCurrent").AssertSuccess();
         }
 
+        public string? PreparePriorCaptureState(string priorState)
+        {
+            switch (priorState)
+            {
+                case "none":
+                    return null;
+                case "old-active":
+                    RunSwitch("ActivateOld").AssertSuccess();
+                    return ReadState().GetProperty("attemptId").GetString();
+                case "restored":
+                    PrepareCurrentActive();
+                    RunSwitch("Restore").AssertSuccess();
+                    return ReadState().GetProperty("attemptId").GetString();
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(priorState), priorState, "Unknown prior capture state.");
+            }
+        }
+
         public void StopAtPhase(string phase, string route)
         {
             string crashPoint = $"after-journal-{phase}";
@@ -584,6 +854,8 @@ public sealed class GameSwitchTests
             return document.RootElement.Clone();
         }
 
+        public string RestoredArchive(string attemptId) => Path.Combine(DirectoryPath, $"game-switch-{attemptId}-restored.json");
+
         public void AssertActiveBuild(string build)
         {
             Assert.True(Directory.Exists(Canonical));
@@ -619,6 +891,29 @@ public sealed class GameSwitchTests
             Assert.Equal("manifest must stay unchanged", File.ReadAllText(AppManifest));
         }
 
+        public void AssertCompletedSnapshot(string buildId)
+        {
+            string path = Path.Combine(SnapshotRoot, buildId);
+            string snapshotPath = Path.Combine(path, "snapshot.json");
+            Assert.True(File.Exists(snapshotPath));
+            using JsonDocument snapshot = JsonDocument.Parse(File.ReadAllText(snapshotPath));
+            Assert.Equal(
+                new[] { "aggregateSha256", "assemblies", "assemblyMetadataSha256", "schemaVersion", "steamBuildId" },
+                snapshot.RootElement.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+            foreach (string assembly in InteropAssemblies)
+            {
+                Assert.True(File.Exists(Path.Combine(path, $"{assembly}.dll")), $"{buildId}/{assembly}.dll");
+            }
+        }
+
+        public void AssertNoPreparingDirectories()
+        {
+            if (Directory.Exists(SnapshotRoot))
+            {
+                Assert.Empty(Directory.EnumerateDirectories(SnapshotRoot, "*.preparing", SearchOption.TopDirectoryOnly));
+            }
+        }
+
         public void Dispose()
         {
             try
@@ -631,6 +926,92 @@ public sealed class GameSwitchTests
             catch (UnauthorizedAccessException)
             {
             }
+        }
+
+        private static readonly string[] InteropAssemblies =
+        {
+            "Assembly-CSharp",
+            "Il2Cppmscorlib",
+            "MilkstoneUnityExtensions",
+            "UnityEngine.CoreModule",
+            "UnityEngine.IMGUIModule",
+            "UnityEngine.InputLegacyModule",
+            "UnityEngine.TextRenderingModule",
+        };
+
+        private void WriteCaptureDriver()
+        {
+            static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string hashes = string.Join(',', CurrentHashArguments.Select(Quote));
+            string body = $$"""
+                $ErrorActionPreference = 'Stop'
+                $wait = {
+                  param($buildId, $gameDirectory)
+                  Add-Content -LiteralPath '{{WaitLog.Replace("'", "''", StringComparison.Ordinal)}}' -Value $buildId
+                  $interop = Join-Path $gameDirectory 'BepInEx/interop'
+                  New-Item -ItemType Directory -Force -Path $interop | Out-Null
+                  foreach ($name in 'Assembly-CSharp','Il2Cppmscorlib','MilkstoneUnityExtensions','UnityEngine.CoreModule','UnityEngine.IMGUIModule','UnityEngine.InputLegacyModule','UnityEngine.TextRenderingModule') {
+                    Set-Content -LiteralPath (Join-Path $interop "$name.dll") -Value "$buildId-$name" -NoNewline
+                  }
+                  New-Item -ItemType Directory -Force -Path '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' | Out-Null
+                  Set-Content -LiteralPath (Join-Path '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' "$buildId.sav") -Value $buildId -NoNewline
+                }
+                & '{{CaptureScript.Replace("'", "''", StringComparison.Ordinal)}}' -StatePath '{{State.Replace("'", "''", StringComparison.Ordinal)}}' -SnapshotRoot '{{SnapshotRoot.Replace("'", "''", StringComparison.Ordinal)}}' -CanonicalGameDirectory '{{Canonical.Replace("'", "''", StringComparison.Ordinal)}}' -SaveDirectory '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' -AppManifestPath '{{AppManifest.Replace("'", "''", StringComparison.Ordinal)}}' -DownloadedOldDepot '{{OldDepot.Replace("'", "''", StringComparison.Ordinal)}}' -OldBuildId 23821227 -OldManifestId 7567480468616200523 -CurrentBuildId 24069957 -CurrentManifestId 2755117260250472086 -ExpectedCurrentNativeHash @({{hashes}}) -ModBuild @('com.abmcar.farmtogether2.autosellmod=24069957','com.abmcar.farmtogether2.qolmod=23821227','com.abmcar.farmtogether2.automodrangemod=23821227','com.abmcar.farmtogether2.farmhandspeedmod=23821227') -SupportedBuildsOutput '{{SupportedBuilds.Replace("'", "''", StringComparison.Ordinal)}}' -WaitForLaunchAndClose $wait -ContractExporterPath '{{FakeExporter.Replace("'", "''", StringComparison.Ordinal)}}'
+                """;
+            File.WriteAllText(CaptureDriver, body);
+        }
+
+        private void WriteFakeExporter()
+        {
+            string body = """
+                [CmdletBinding()]
+                param(
+                  [string]$SnapshotInteropDirectory,
+                  [string]$SteamBuildId,
+                  [string]$SnapshotOutput,
+                  [string[]]$BuildSnapshot,
+                  [string[]]$ModBuild,
+                  [string]$SupportedBuildsOutput
+                )
+                $ErrorActionPreference = 'Stop'
+                $names = @('Assembly-CSharp','Il2Cppmscorlib','MilkstoneUnityExtensions','UnityEngine.CoreModule','UnityEngine.IMGUIModule','UnityEngine.InputLegacyModule','UnityEngine.TextRenderingModule')
+                function Write-JsonAtomic($value, $path) {
+                  $temporary = "$path.tmp"
+                  $json = ($value | ConvertTo-Json -Depth 8 -Compress) + "`n"
+                  [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+                  [IO.File]::Move($temporary, $path, (Test-Path -LiteralPath $path))
+                }
+                if ($SnapshotInteropDirectory) {
+                  $hashes = [ordered]@{}
+                  $assemblies = @()
+                  foreach ($name in $names) {
+                    $path = Join-Path $SnapshotInteropDirectory "$name.dll"
+                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing assembly: $name" }
+                    $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $assemblies += [ordered]@{name=$name;version='0.0.0.0';culture='';publicKeyToken=''}
+                  }
+                  $vector = ($hashes.GetEnumerator() | ForEach-Object { "$($_.Key)`t$($_.Value)" }) -join "`n"
+                  $aggregate = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($vector))).ToLowerInvariant()
+                  Write-JsonAtomic ([ordered]@{schemaVersion=1;steamBuildId="$SteamBuildId";aggregateSha256=$aggregate;assemblyMetadataSha256=$hashes;assemblies=$assemblies}) $SnapshotOutput
+                  return
+                }
+                if (-not $BuildSnapshot -or $BuildSnapshot.Count -ne 2) { throw 'exactly two snapshots required' }
+                if (-not $ModBuild -or $ModBuild.Count -ne 4) { throw 'exactly four mod builds required' }
+                $builds = [ordered]@{}
+                $assemblies = $null
+                foreach ($path in $BuildSnapshot) {
+                  $snapshot = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+                  $builds[$snapshot.steamBuildId] = [ordered]@{aggregateSha256=$snapshot.aggregateSha256;assemblyMetadataSha256=$snapshot.assemblyMetadataSha256}
+                  $assemblies = $snapshot.assemblies
+                }
+                $mods = [ordered]@{}
+                foreach ($entry in $ModBuild) {
+                  $parts = $entry.Split('=', 2)
+                  $mods[$parts[0]] = [ordered]@{steamBuildId=$parts[1]}
+                }
+                Write-JsonAtomic ([ordered]@{schemaVersion=1;mods=$mods;builds=$builds;assemblies=$assemblies}) $SupportedBuildsOutput
+                """;
+            File.WriteAllText(FakeExporter, body);
         }
 
         private static void CreateBuild(string root, string build)
@@ -713,5 +1094,9 @@ public sealed class GameSwitchTests
             Assert.NotEqual(0, ExitCode);
             Assert.Contains(expectedText, $"{Output}\n{Error}", StringComparison.OrdinalIgnoreCase);
         }
+
+
+        public void AssertExitCode(int expected) =>
+            Assert.True(ExitCode == expected, $"pwsh exited {ExitCode}, expected {expected}\nstdout:\n{Output}\nstderr:\n{Error}");
     }
 }
