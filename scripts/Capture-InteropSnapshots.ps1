@@ -21,6 +21,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:CaptureScript = $PSCommandPath
 $script:SwitchScript = Join-Path $PSScriptRoot 'Switch-GameBuild.ps1'
 $script:AssemblyNames = @(
     'Assembly-CSharp',
@@ -114,6 +115,14 @@ function Assert-NoExistingAncestorLink {
     }
 }
 
+function Get-CaptureToolSet {
+    return @(
+        [pscustomobject]@{ Name = 'Capture-InteropSnapshots.ps1'; Path = $script:CaptureScript },
+        [pscustomobject]@{ Name = 'Switch-GameBuild.ps1'; Path = $script:SwitchScript },
+        [pscustomobject]@{ Name = 'ContractExporterPath'; Path = $ContractExporterPath }
+    )
+}
+
 function Assert-CapturePathTopology {
     $mutableRoots = @(
         [pscustomobject]@{ Name = 'canonical game'; Path = $CanonicalGameDirectory },
@@ -130,74 +139,60 @@ function Assert-CapturePathTopology {
             }
         }
     }
-    foreach ($external in @(
+    $protectedPaths = @(
         [pscustomobject]@{ Name = 'StatePath'; Path = $StatePath },
-        [pscustomobject]@{ Name = 'AppManifestPath'; Path = $AppManifestPath }
-    )) {
-        foreach ($root in $mutableRoots) {
-            if (Test-PathIsEqualOrDescendant $external.Path $root.Path) {
-                throw "Invalid capture path topology: $($external.Name) is inside the $($root.Name) tree."
-            }
-        }
-    }
-    if ([string]::Equals($StatePath, $AppManifestPath, $script:PathComparison)) {
-        throw 'Invalid capture path topology: StatePath and AppManifestPath are the same file.'
-    }
-    foreach ($output in @(
+        [pscustomobject]@{ Name = 'AppManifestPath'; Path = $AppManifestPath },
         [pscustomobject]@{ Name = 'SnapshotRoot'; Path = $SnapshotRoot },
         [pscustomobject]@{ Name = 'SupportedBuildsOutput'; Path = $SupportedBuildsOutput }
-    )) {
+    )
+    foreach ($protectedPath in $protectedPaths) {
         foreach ($root in $mutableRoots) {
             if (
-                (Test-PathIsEqualOrDescendant $output.Path $root.Path) -or
-                (Test-PathIsEqualOrDescendant $root.Path $output.Path)
+                (Test-PathIsEqualOrDescendant $protectedPath.Path $root.Path) -or
+                (Test-PathIsEqualOrDescendant $root.Path $protectedPath.Path)
             ) {
-                throw "Invalid capture path topology: $($output.Name) and $($root.Name) are equal or nested."
+                throw "Invalid capture path topology: $($protectedPath.Name) and $($root.Name) are equal or nested."
             }
         }
     }
-    if (
-        (Test-PathIsEqualOrDescendant $StatePath $SnapshotRoot) -or
-        (Test-PathIsEqualOrDescendant $SnapshotRoot $StatePath)
-    ) {
-        throw 'Invalid capture path topology: StatePath and SnapshotRoot are equal or nested.'
+    for ($left = 0; $left -lt $protectedPaths.Count; $left++) {
+        for ($right = $left + 1; $right -lt $protectedPaths.Count; $right++) {
+            if (
+                (Test-PathIsEqualOrDescendant $protectedPaths[$left].Path $protectedPaths[$right].Path) -or
+                (Test-PathIsEqualOrDescendant $protectedPaths[$right].Path $protectedPaths[$left].Path)
+            ) {
+                throw "Invalid capture path topology: $($protectedPaths[$left].Name) and $($protectedPaths[$right].Name) are equal or nested."
+            }
+        }
     }
-    if (
-        (Test-PathIsEqualOrDescendant $StatePath $SupportedBuildsOutput) -or
-        (Test-PathIsEqualOrDescendant $SupportedBuildsOutput $StatePath)
-    ) {
-        throw 'Invalid capture path topology: StatePath and SupportedBuildsOutput are equal or nested.'
-    }
-    if (
-        (Test-PathIsEqualOrDescendant $SupportedBuildsOutput $SnapshotRoot) -or
-        (Test-PathIsEqualOrDescendant $SnapshotRoot $SupportedBuildsOutput)
-    ) {
-        throw 'Invalid capture path topology: SupportedBuildsOutput and SnapshotRoot are equal or nested.'
-    }
-    foreach ($tool in @(
-        [pscustomobject]@{ Name = 'Switch-GameBuild.ps1'; Path = $script:SwitchScript },
-        [pscustomobject]@{ Name = 'ContractExporterPath'; Path = $ContractExporterPath }
-    )) {
+    $tools = @(Get-CaptureToolSet)
+    foreach ($tool in $tools) {
         foreach ($root in $mutableRoots) {
-            if (Test-PathIsEqualOrDescendant $tool.Path $root.Path) {
-                throw "Invalid capture path topology: $($tool.Name) is inside the $($root.Name) tree."
+            if (
+                (Test-PathIsEqualOrDescendant $tool.Path $root.Path) -or
+                (Test-PathIsEqualOrDescendant $root.Path $tool.Path)
+            ) {
+                throw "Invalid capture path topology: $($tool.Name) and $($root.Name) are equal or nested."
             }
         }
     }
-    foreach ($protectedPath in @(
-        [pscustomobject]@{ Name = 'StatePath'; Path = $StatePath },
-        [pscustomobject]@{ Name = 'SnapshotRoot'; Path = $SnapshotRoot },
-        [pscustomobject]@{ Name = 'SupportedBuildsOutput'; Path = $SupportedBuildsOutput }
-    )) {
-        foreach ($tool in @(
-            [pscustomobject]@{ Name = 'Switch-GameBuild.ps1'; Path = $script:SwitchScript },
-            [pscustomobject]@{ Name = 'ContractExporterPath'; Path = $ContractExporterPath }
-        )) {
+    foreach ($protectedPath in $protectedPaths) {
+        foreach ($tool in $tools) {
             if (
                 (Test-PathIsEqualOrDescendant $protectedPath.Path $tool.Path) -or
                 (Test-PathIsEqualOrDescendant $tool.Path $protectedPath.Path)
             ) {
                 throw "Invalid capture path topology: $($protectedPath.Name) and $($tool.Name) are equal or nested."
+            }
+        }
+    }
+    for ($left = 0; $left -lt $tools.Count; $left++) {
+        for ($right = $left + 1; $right -lt $tools.Count; $right++) {
+            if (
+                (Test-PathIsEqualOrDescendant $tools[$left].Path $tools[$right].Path) -or
+                (Test-PathIsEqualOrDescendant $tools[$right].Path $tools[$left].Path)
+            ) {
+                throw "Invalid capture path topology: $($tools[$left].Name) and $($tools[$right].Name) are equal or nested."
             }
         }
     }
@@ -720,6 +715,8 @@ $AppManifestPath = Get-NormalizedAbsolutePath $AppManifestPath
 $DownloadedOldDepot = Get-NormalizedAbsolutePath $DownloadedOldDepot
 $SupportedBuildsOutput = Get-NormalizedAbsolutePath $SupportedBuildsOutput
 $ContractExporterPath = Get-NormalizedAbsolutePath $ContractExporterPath
+$script:CaptureScript = Get-NormalizedAbsolutePath $script:CaptureScript
+$script:SwitchScript = Get-NormalizedAbsolutePath $script:SwitchScript
 
 if ($OldBuildId -cnotmatch '^[0-9]+$' -or $CurrentBuildId -cnotmatch '^[0-9]+$' -or $OldBuildId -ceq $CurrentBuildId) {
     throw 'Capture requires two distinct decimal Steam build IDs.'
@@ -727,16 +724,13 @@ if ($OldBuildId -cnotmatch '^[0-9]+$' -or $CurrentBuildId -cnotmatch '^[0-9]+$' 
 if ($OldManifestId -cnotmatch '^[0-9]+$' -or $CurrentManifestId -cnotmatch '^[0-9]+$') {
     throw 'Capture requires decimal old/current manifest IDs.'
 }
-if (-not (Test-Path -LiteralPath $script:SwitchScript -PathType Leaf)) {
-    throw "Game-switch script is missing: $($script:SwitchScript)"
-}
-if (-not (Test-Path -LiteralPath $ContractExporterPath -PathType Leaf)) {
-    throw "Contract exporter is missing: $ContractExporterPath"
-}
-foreach ($toolPath in @($script:SwitchScript, $ContractExporterPath)) {
-    $toolItem = Get-Item -LiteralPath $toolPath -Force
+foreach ($tool in @(Get-CaptureToolSet)) {
+    if (-not (Test-Path -LiteralPath $tool.Path -PathType Leaf)) {
+        throw "Capture tooling is missing: $($tool.Name): $($tool.Path)"
+    }
+    $toolItem = Get-Item -LiteralPath $tool.Path -Force
     if ($toolItem.LinkType -or (($toolItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw "Capture tooling must not be a symlink or reparse point: $toolPath"
+        throw "Capture tooling must not be a symlink or reparse point: $($tool.Path)"
     }
 }
 if (Test-Path -LiteralPath $SupportedBuildsOutput) {
@@ -748,11 +742,28 @@ if (Test-Path -LiteralPath $SupportedBuildsOutput) {
 Assert-ExpectedNativeHashInputSet
 Assert-ModBuildInputSet
 Assert-CapturePathTopology
+Assert-NoExistingAncestorLink -Path $CanonicalGameDirectory -Label 'CanonicalGameDirectory'
+Assert-NoExistingAncestorLink -Path $SaveDirectory -Label 'SaveDirectory'
+Assert-NoExistingAncestorLink -Path $DownloadedOldDepot -Label 'DownloadedOldDepot'
+Assert-NoExistingAncestorLink -Path $AppManifestPath -Label 'AppManifestPath'
 Assert-NoExistingAncestorLink -Path $StatePath -Label 'StatePath'
 Assert-NoExistingAncestorLink -Path $SnapshotRoot -Label 'SnapshotRoot'
 Assert-NoExistingAncestorLink -Path $SupportedBuildsOutput -Label 'SupportedBuildsOutput'
-Assert-NoExistingAncestorLink -Path $script:SwitchScript -Label 'Switch-GameBuild.ps1'
-Assert-NoExistingAncestorLink -Path $ContractExporterPath -Label 'ContractExporterPath'
+foreach ($tool in @(Get-CaptureToolSet)) {
+    Assert-NoExistingAncestorLink -Path $tool.Path -Label $tool.Name
+}
+if (-not (Test-Path -LiteralPath $CanonicalGameDirectory -PathType Container)) {
+    throw "CanonicalGameDirectory is missing: $CanonicalGameDirectory"
+}
+if ((Test-Path -LiteralPath $SaveDirectory) -and -not (Test-Path -LiteralPath $SaveDirectory -PathType Container)) {
+    throw "SaveDirectory exists but is not a directory: $SaveDirectory"
+}
+if (-not (Test-Path -LiteralPath $DownloadedOldDepot -PathType Container)) {
+    throw "DownloadedOldDepot is missing: $DownloadedOldDepot"
+}
+if (-not (Test-Path -LiteralPath $AppManifestPath -PathType Leaf)) {
+    throw "AppManifestPath is missing: $AppManifestPath"
+}
 [IO.Directory]::CreateDirectory($SnapshotRoot) | Out-Null
 $snapshotRootItem = Get-Item -LiteralPath $SnapshotRoot -Force
 if ($snapshotRootItem.LinkType -or (($snapshotRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {

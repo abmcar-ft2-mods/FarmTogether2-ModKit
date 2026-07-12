@@ -359,6 +359,22 @@ public sealed class GameSwitchTests
     }
 
     [Theory]
+    [InlineData("canonical")]
+    [InlineData("save")]
+    [InlineData("depot")]
+    [InlineData("appmanifest")]
+    public void ActivateOldRejectsLinkedAncestorsBeforeMutation(string path)
+    {
+        using Fixture fixture = new();
+        Fixture.IntegritySnapshot before = fixture.ReadIntegritySnapshot();
+
+        fixture.RunLinkedAncestor(path, capture: false).AssertFailure("symlink");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertIntegritySnapshot(before);
+    }
+
+    [Theory]
     [InlineData("state-in-canonical")]
     [InlineData("state-in-save")]
     [InlineData("state-in-depot")]
@@ -495,22 +511,64 @@ public sealed class GameSwitchTests
     [InlineData("supported-inside-snapshot")]
     [InlineData("exporter-inside-canonical")]
     [InlineData("supported-equals-exporter")]
+    [InlineData("supported-equals-appmanifest")]
+    [InlineData("state-equals-appmanifest")]
+    [InlineData("snapshot-equals-appmanifest")]
+    [InlineData("appmanifest-equals-switch")]
+    [InlineData("appmanifest-equals-exporter")]
+    [InlineData("appmanifest-equals-capture")]
+    [InlineData("supported-equals-capture")]
     [InlineData("state-equals-switch")]
     [InlineData("snapshot-parent-link")]
     [InlineData("supported-parent-link")]
     public void CaptureRejectsConflictingOutputAndToolPathsBeforeGameMutation(string scenario)
     {
         using Fixture fixture = new();
-        byte[] switchBytes = File.ReadAllBytes(SwitchScript);
-        byte[] exporterBytes = File.ReadAllBytes(fixture.FakeExporter);
 
-        fixture.RunInvalidCaptureTopology(scenario).AssertFailure("topology");
+        ProcessResult result = fixture.RunInvalidCaptureTopology(scenario, out Fixture.IntegritySnapshot before);
+
+        result.AssertFailure("topology");
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertIntegritySnapshot(before);
+    }
+
+    [Theory]
+    [InlineData("canonical")]
+    [InlineData("save")]
+    [InlineData("depot")]
+    [InlineData("appmanifest")]
+    public void CaptureRejectsLinkedAncestorsBeforeMutation(string path)
+    {
+        using Fixture fixture = new();
+        Fixture.IntegritySnapshot before = fixture.ReadIntegritySnapshot();
+
+        fixture.RunLinkedAncestor(path, capture: true).AssertFailure("symlink");
 
         Assert.False(File.Exists(fixture.State));
-        fixture.AssertOriginalTree();
-        Assert.Equal(switchBytes, File.ReadAllBytes(SwitchScript));
-        Assert.Equal(exporterBytes, File.ReadAllBytes(fixture.FakeExporter));
-        Assert.Empty(Directory.EnumerateFileSystemEntries(fixture.DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
+        fixture.AssertIntegritySnapshot(before);
+    }
+
+    [Fact]
+    public void CaptureRejectsALinkedAncestorOfItsOwnToolingBeforeMutation()
+    {
+        using Fixture fixture = new();
+
+        ProcessResult result = fixture.RunCaptureThroughLinkedToolAncestor(out Fixture.IntegritySnapshot before);
+
+        result.AssertFailure("symlink");
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertIntegritySnapshot(before);
+    }
+
+    [Fact]
+    public void CaptureReportsBothCaptureAndRestoreFailures()
+    {
+        using Fixture fixture = new();
+
+        ProcessResult result = fixture.RunCaptureWithCaptureAndRestoreFailure();
+
+        result.AssertFailure("primary capture failure");
+        result.AssertFailure("Appmanifest hash mismatch");
     }
 
     [Fact]
@@ -618,6 +676,54 @@ public sealed class GameSwitchTests
         public IReadOnlyDictionary<string, string> OldHashes { get; }
         public IReadOnlyList<string> CurrentHashArguments { get; }
 
+        public sealed record IntegritySnapshot(
+            string CanonicalTree,
+            string SaveTree,
+            string DepotTree,
+            byte[] AppManifestBytes,
+            byte[] CaptureScriptBytes,
+            byte[] SwitchScriptBytes,
+            byte[] ExporterBytes,
+            bool StateExists,
+            bool SnapshotRootExists,
+            bool SupportedBuildsExists,
+            bool WaitLogExists,
+            IReadOnlyDictionary<string, byte[]> AdditionalToolBytes);
+
+        public IntegritySnapshot ReadIntegritySnapshot(params string[] additionalToolPaths) => new(
+            DirectoryTreeFingerprint(Canonical),
+            DirectoryTreeFingerprint(Save),
+            DirectoryTreeFingerprint(OldDepot),
+            File.ReadAllBytes(AppManifest),
+            File.ReadAllBytes(CaptureScript),
+            File.ReadAllBytes(SwitchScript),
+            File.ReadAllBytes(FakeExporter),
+            File.Exists(State),
+            Directory.Exists(SnapshotRoot),
+            File.Exists(SupportedBuilds),
+            File.Exists(WaitLog),
+            additionalToolPaths.ToDictionary(path => path, File.ReadAllBytes, StringComparer.Ordinal));
+
+        public void AssertIntegritySnapshot(IntegritySnapshot expected)
+        {
+            Assert.Equal(expected.CanonicalTree, DirectoryTreeFingerprint(Canonical));
+            Assert.Equal(expected.SaveTree, DirectoryTreeFingerprint(Save));
+            Assert.Equal(expected.DepotTree, DirectoryTreeFingerprint(OldDepot));
+            Assert.Equal(expected.AppManifestBytes, File.ReadAllBytes(AppManifest));
+            Assert.Equal(expected.CaptureScriptBytes, File.ReadAllBytes(CaptureScript));
+            Assert.Equal(expected.SwitchScriptBytes, File.ReadAllBytes(SwitchScript));
+            Assert.Equal(expected.ExporterBytes, File.ReadAllBytes(FakeExporter));
+            Assert.Equal(expected.StateExists, File.Exists(State));
+            Assert.Equal(expected.SnapshotRootExists, Directory.Exists(SnapshotRoot));
+            Assert.Equal(expected.SupportedBuildsExists, File.Exists(SupportedBuilds));
+            Assert.Equal(expected.WaitLogExists, File.Exists(WaitLog));
+            foreach ((string path, byte[] bytes) in expected.AdditionalToolBytes)
+            {
+                Assert.Equal(bytes, File.ReadAllBytes(path));
+            }
+            Assert.Empty(Directory.EnumerateFileSystemEntries(DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
+        }
+
         public ProcessResult RunSwitch(
             string action,
             string? crashPoint = null,
@@ -625,17 +731,19 @@ public sealed class GameSwitchTests
             string? statePathOverride = null,
             string? canonicalOverride = null,
             string? saveOverride = null,
-            string? depotOverride = null)
+            string? depotOverride = null,
+            string? appManifestOverride = null)
         {
             static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
             string selectedState = statePathOverride ?? State;
             string selectedCanonical = canonicalOverride ?? Canonical;
             string selectedSave = saveOverride ?? Save;
             string selectedDepot = depotOverride ?? OldDepot;
+            string selectedAppManifest = appManifestOverride ?? AppManifest;
             StringBuilder invocation = new($"& {Quote(SwitchScript)} -Action {Quote(action)} -StatePath {Quote(selectedState)}");
             if (action == "ActivateOld")
             {
-                invocation.Append($" -CanonicalGameDirectory {Quote(selectedCanonical)} -SaveDirectory {Quote(selectedSave)} -AppManifestPath {Quote(AppManifest)} -DownloadedOldDepot {Quote(selectedDepot)}");
+                invocation.Append($" -CanonicalGameDirectory {Quote(selectedCanonical)} -SaveDirectory {Quote(selectedSave)} -AppManifestPath {Quote(selectedAppManifest)} -DownloadedOldDepot {Quote(selectedDepot)}");
                 invocation.Append(" -OldBuildId 23821227 -OldManifestId 7567480468616200523 -CurrentBuildId 24069957 -CurrentManifestId 2755117260250472086");
                 invocation.Append($" -ExpectedCurrentNativeHash @({string.Join(',', (expectedHashOverride ?? CurrentHashArguments).Select(Quote))})");
             }
@@ -661,7 +769,30 @@ public sealed class GameSwitchTests
             return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
         }
 
-        public ProcessResult RunInvalidCaptureTopology(string scenario)
+        public ProcessResult RunCaptureWithCaptureAndRestoreFailure()
+        {
+            static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string body = File.ReadAllText(CaptureDriver);
+            string hook = $$"""
+                $hook = {
+                  param($point)
+                  if ($point -ceq 'after-activate-current') {
+                    [IO.File]::WriteAllText('{{AppManifest.Replace("'", "''", StringComparison.Ordinal)}}', 'forced restore failure')
+                    throw 'primary capture failure'
+                  }
+                }
+                """;
+            body = body.Replace("$wait = {", $"{hook}{Environment.NewLine}$wait = {{", StringComparison.Ordinal);
+            body = body.Replace(
+                $" -ContractExporterPath {Quote(FakeExporter)}",
+                $" -ContractExporterPath {Quote(FakeExporter)} -OperationHook $hook",
+                StringComparison.Ordinal);
+            string driver = Path.Combine(DirectoryPath, "capture-and-restore-failure-driver.ps1");
+            File.WriteAllText(driver, body);
+            return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
+        }
+
+        public ProcessResult RunInvalidCaptureTopology(string scenario, out IntegritySnapshot before)
         {
             static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
             string body = File.ReadAllText(CaptureDriver);
@@ -680,6 +811,27 @@ public sealed class GameSwitchTests
                     break;
                 case "supported-equals-exporter":
                     body = body.Replace(Quote(SupportedBuilds), Quote(FakeExporter), StringComparison.Ordinal);
+                    break;
+                case "supported-equals-appmanifest":
+                    body = body.Replace(Quote(SupportedBuilds), Quote(AppManifest), StringComparison.Ordinal);
+                    break;
+                case "state-equals-appmanifest":
+                    body = body.Replace(Quote(State), Quote(AppManifest), StringComparison.Ordinal);
+                    break;
+                case "snapshot-equals-appmanifest":
+                    body = body.Replace(Quote(SnapshotRoot), Quote(AppManifest), StringComparison.Ordinal);
+                    break;
+                case "appmanifest-equals-switch":
+                    body = body.Replace(Quote(AppManifest), Quote(SwitchScript), StringComparison.Ordinal);
+                    break;
+                case "appmanifest-equals-exporter":
+                    body = body.Replace(Quote(AppManifest), Quote(FakeExporter), StringComparison.Ordinal);
+                    break;
+                case "appmanifest-equals-capture":
+                    body = body.Replace(Quote(AppManifest), Quote(CaptureScript), StringComparison.Ordinal);
+                    break;
+                case "supported-equals-capture":
+                    body = body.Replace(Quote(SupportedBuilds), Quote(CaptureScript), StringComparison.Ordinal);
                     break;
                 case "state-equals-switch":
                     body = body.Replace(Quote(State), Quote(SwitchScript), StringComparison.Ordinal);
@@ -701,8 +853,57 @@ public sealed class GameSwitchTests
                 default:
                     throw new ArgumentOutOfRangeException(nameof(scenario), scenario, "Unknown capture topology scenario.");
             }
+            before = ReadIntegritySnapshot();
             string driver = Path.Combine(DirectoryPath, $"invalid-capture-driver-{Guid.NewGuid():N}.ps1");
             File.WriteAllText(driver, body);
+            return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
+        }
+
+        public ProcessResult RunLinkedAncestor(string path, bool capture)
+        {
+            static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string alias = Path.Combine(DirectoryPath, $"ancestor-link-{Guid.NewGuid():N}");
+            Directory.CreateSymbolicLink(alias, DirectoryPath);
+            string original = path switch
+            {
+                "canonical" => Canonical,
+                "save" => Save,
+                "depot" => OldDepot,
+                "appmanifest" => AppManifest,
+                _ => throw new ArgumentOutOfRangeException(nameof(path), path, "Unknown linked ancestor path."),
+            };
+            string throughLink = Path.Combine(alias, Path.GetRelativePath(DirectoryPath, original));
+            if (capture)
+            {
+                string body = File.ReadAllText(CaptureDriver).Replace(Quote(original), Quote(throughLink), StringComparison.Ordinal);
+                string driver = Path.Combine(DirectoryPath, $"linked-ancestor-capture-driver-{Guid.NewGuid():N}.ps1");
+                File.WriteAllText(driver, body);
+                return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
+            }
+            return RunSwitch(
+                "ActivateOld",
+                canonicalOverride: path == "canonical" ? throughLink : Canonical,
+                saveOverride: path == "save" ? throughLink : Save,
+                depotOverride: path == "depot" ? throughLink : OldDepot,
+                appManifestOverride: path == "appmanifest" ? throughLink : AppManifest);
+        }
+
+        public ProcessResult RunCaptureThroughLinkedToolAncestor(out IntegritySnapshot before)
+        {
+            static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string target = Path.Combine(DirectoryPath, "linked-tool-target");
+            string alias = Path.Combine(DirectoryPath, "linked-tool-parent");
+            Directory.CreateDirectory(target);
+            string captureCopy = Path.Combine(target, Path.GetFileName(CaptureScript));
+            string switchCopy = Path.Combine(target, Path.GetFileName(SwitchScript));
+            File.Copy(CaptureScript, captureCopy);
+            File.Copy(SwitchScript, switchCopy);
+            Directory.CreateSymbolicLink(alias, target);
+            string linkedCapture = Path.Combine(alias, Path.GetFileName(CaptureScript));
+            string body = File.ReadAllText(CaptureDriver).Replace(Quote(CaptureScript), Quote(linkedCapture), StringComparison.Ordinal);
+            string driver = Path.Combine(DirectoryPath, "linked-tool-capture-driver.ps1");
+            File.WriteAllText(driver, body);
+            before = ReadIntegritySnapshot(captureCopy, switchCopy);
             return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
         }
 
@@ -1056,6 +1257,30 @@ public sealed class GameSwitchTests
                     .OrderBy(entry => entry.Path, StringComparer.Ordinal)
                     .Select(entry => $"{entry.Path}\t{entry.Hash}"));
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(vector))).ToLowerInvariant();
+        }
+
+        private static string DirectoryTreeFingerprint(string root)
+        {
+            if (!Directory.Exists(root))
+            {
+                return "<absent>";
+            }
+            List<string> entries = new() { "directory\t." };
+            entries.AddRange(
+                Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories)
+                    .Select(path => $"directory\t{Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/')}")
+                    .Order(StringComparer.Ordinal));
+            entries.AddRange(
+                Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                    .Select(path =>
+                    {
+                        string relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+                        string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+                        return $"file\t{relative}\t{hash}";
+                    })
+                    .Order(StringComparer.Ordinal));
+            entries.Sort(StringComparer.Ordinal);
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', entries)))).ToLowerInvariant();
         }
 
         private static ProcessResult RunPowerShell(IEnumerable<string> arguments, string environmentName, string? environmentValue)

@@ -142,6 +142,7 @@ function Assert-ExistingDirectoryRootIsNotLink {
         [Parameter(Mandatory)][string]$Label
     )
 
+    Assert-NoExistingAncestorLink -Path $Path -Label $Label
     if (-not (Test-Path -LiteralPath $Path)) {
         return
     }
@@ -151,6 +152,28 @@ function Assert-ExistingDirectoryRootIsNotLink {
     }
     if ($item.LinkType -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
         throw "$Label root must not be a symlink or reparse point: $Path"
+    }
+}
+
+function Assert-NoExistingAncestorLink {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $cursor = $Path
+    while (-not [string]::IsNullOrEmpty($cursor)) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if ($item.LinkType -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                throw "$Label has an existing symlink or reparse ancestor at $cursor."
+            }
+        }
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrEmpty($parent) -or [string]::Equals($parent, $cursor, $script:PathComparison)) {
+            break
+        }
+        $cursor = $parent
     }
 }
 
@@ -476,6 +499,7 @@ function Assert-ClosedState {
         throw 'Game-switch state attempt-qualified paths do not match attemptId.'
     }
     Assert-InputPathTopology ([string]$State.canonical) ([string]$State.saveDirectory) ([string]$State.downloadedOldDepot) ([string]$State.appManifestPath)
+    Assert-NoExistingAncestorLink ([string]$State.appManifestPath) 'Game-switch state appManifestPath'
     foreach ($field in 'canonical', 'saveDirectory', 'downloadedOldDepot', 'originalGameDirectory', 'oldSmokeGameDirectory', 'currentSmokeGameDirectory', 'originalSaveDirectory', 'oldSmokeSaveDirectory', 'currentSmokeSaveDirectory') {
         Assert-ExistingDirectoryRootIsNotLink ([string]$State.$field) "Game-switch state $field"
     }
@@ -899,6 +923,28 @@ function Assert-ActivateOldInputs {
     return $expected
 }
 
+function Assert-ActivateOldPathSafety {
+    foreach ($item in @(
+        @{ Name = 'CanonicalGameDirectory'; Value = $CanonicalGameDirectory },
+        @{ Name = 'SaveDirectory'; Value = $SaveDirectory },
+        @{ Name = 'AppManifestPath'; Value = $AppManifestPath },
+        @{ Name = 'DownloadedOldDepot'; Value = $DownloadedOldDepot }
+    )) {
+        if ([string]::IsNullOrWhiteSpace([string]$item.Value)) {
+            throw "ActivateOld requires -$($item.Name)."
+        }
+    }
+    $canonical = Get-NormalizedAbsolutePath $CanonicalGameDirectory
+    $save = Get-NormalizedAbsolutePath $SaveDirectory
+    $manifest = Get-NormalizedAbsolutePath $AppManifestPath
+    $depot = Get-NormalizedAbsolutePath $DownloadedOldDepot
+    Assert-InputPathTopology $canonical $save $depot $manifest
+    Assert-NoExistingAncestorLink $canonical 'CanonicalGameDirectory'
+    Assert-NoExistingAncestorLink $save 'SaveDirectory'
+    Assert-NoExistingAncestorLink $depot 'DownloadedOldDepot'
+    Assert-NoExistingAncestorLink $manifest 'AppManifestPath'
+}
+
 function New-SwitchState {
     param([Parameter(Mandatory)]$ExpectedMap)
 
@@ -919,6 +965,7 @@ function New-SwitchState {
     Assert-ExistingDirectoryRootIsNotLink $canonical 'Canonical game'
     Assert-ExistingDirectoryRootIsNotLink $save 'Save'
     Assert-ExistingDirectoryRootIsNotLink $depot 'Downloaded depot'
+    Assert-NoExistingAncestorLink $manifest 'Appmanifest'
     foreach ($identifier in @($OldBuildId, $OldManifestId, $CurrentBuildId, $CurrentManifestId)) {
         if ($identifier -cnotmatch '^[0-9]+$') {
             throw "Build and manifest identifiers must contain decimal digits only: $identifier"
@@ -1064,6 +1111,7 @@ function Assert-CurrentActiveTopology {
 }
 
 function Invoke-ActivateOld {
+    Assert-ActivateOldPathSafety
     $state = Read-StateWithRecovery
     $expectedMap = Assert-ActivateOldInputs $state
     if ($null -eq $state) {
@@ -1218,6 +1266,7 @@ function Invoke-Restore {
 }
 
 $StatePath = Get-NormalizedAbsolutePath $StatePath
+Assert-NoExistingAncestorLink $StatePath 'StatePath'
 switch ($Action) {
     'ActivateOld' { Invoke-ActivateOld }
     'ActivateCurrent' { Invoke-ActivateCurrent }
