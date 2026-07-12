@@ -22,6 +22,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:PathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
 
 $script:StateFields = @(
     'schemaVersion',
@@ -113,6 +114,82 @@ function Get-NormalizedAbsolutePath {
         $full = $full.Substring(0, $full.Length - 1)
     }
     return $full
+}
+
+function Test-PathIsEqualOrDescendant {
+    param(
+        [Parameter(Mandatory)][string]$Candidate,
+        [Parameter(Mandatory)][string]$Ancestor
+    )
+
+    if ([string]::Equals($Candidate, $Ancestor, $script:PathComparison)) {
+        return $true
+    }
+    $prefix = if (
+        $Ancestor.EndsWith([IO.Path]::DirectorySeparatorChar) -or
+        $Ancestor.EndsWith([IO.Path]::AltDirectorySeparatorChar)
+    ) {
+        $Ancestor
+    } else {
+        $Ancestor + [IO.Path]::DirectorySeparatorChar
+    }
+    return $Candidate.StartsWith($prefix, $script:PathComparison)
+}
+
+function Assert-ExistingDirectoryRootIsNotLink {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (-not $item.PSIsContainer) {
+        throw "$Label root is not a directory: $Path"
+    }
+    if ($item.LinkType -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "$Label root must not be a symlink or reparse point: $Path"
+    }
+}
+
+function Assert-InputPathTopology {
+    param(
+        [Parameter(Mandatory)][string]$Canonical,
+        [Parameter(Mandatory)][string]$Save,
+        [Parameter(Mandatory)][string]$Depot,
+        [Parameter(Mandatory)][string]$Manifest
+    )
+
+    $trees = @(
+        [pscustomobject]@{ Name = 'canonical game'; Path = $Canonical },
+        [pscustomobject]@{ Name = 'save'; Path = $Save },
+        [pscustomobject]@{ Name = 'downloaded depot'; Path = $Depot }
+    )
+    for ($left = 0; $left -lt $trees.Count; $left++) {
+        for ($right = $left + 1; $right -lt $trees.Count; $right++) {
+            if (
+                (Test-PathIsEqualOrDescendant $trees[$left].Path $trees[$right].Path) -or
+                (Test-PathIsEqualOrDescendant $trees[$right].Path $trees[$left].Path)
+            ) {
+                throw "Invalid path topology: $($trees[$left].Name) and $($trees[$right].Name) are equal or nested."
+            }
+        }
+    }
+    foreach ($external in @(
+        [pscustomobject]@{ Name = 'StatePath'; Path = $StatePath },
+        [pscustomobject]@{ Name = 'AppManifestPath'; Path = $Manifest }
+    )) {
+        foreach ($tree in $trees) {
+            if (Test-PathIsEqualOrDescendant $external.Path $tree.Path) {
+                throw "Invalid path topology: $($external.Name) is inside the $($tree.Name) tree."
+            }
+        }
+    }
+    if ([string]::Equals($StatePath, $Manifest, $script:PathComparison)) {
+        throw 'Invalid path topology: StatePath and AppManifestPath are the same file.'
+    }
 }
 
 function Get-Sha256 {
@@ -282,13 +359,19 @@ function Get-DirectoryFingerprint {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         throw "Directory is missing: $Root"
     }
-    $fileMap = [ordered]@{}
-    Get-ChildItem -LiteralPath $Root -File -Force -Recurse | ForEach-Object {
-        if ($_.LinkType) {
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if ($rootItem.LinkType -or (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Directory fingerprints do not follow links: $Root"
+    }
+    $fileMap = [Collections.Generic.SortedDictionary[string, string]]::new([StringComparer]::Ordinal)
+    Get-ChildItem -LiteralPath $Root -Force -Recurse | ForEach-Object {
+        if ($_.LinkType -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
             throw "Directory fingerprints do not follow links: $($_.FullName)"
         }
-        $relative = [IO.Path]::GetRelativePath($Root, $_.FullName).Replace('\', '/')
-        $fileMap[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (-not $_.PSIsContainer) {
+            $relative = [IO.Path]::GetRelativePath($Root, $_.FullName).Replace('\', '/')
+            $fileMap[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
     }
     return Get-HashMapFingerprint $fileMap
 }
@@ -392,6 +475,10 @@ function Assert-ClosedState {
     ) {
         throw 'Game-switch state attempt-qualified paths do not match attemptId.'
     }
+    Assert-InputPathTopology ([string]$State.canonical) ([string]$State.saveDirectory) ([string]$State.downloadedOldDepot) ([string]$State.appManifestPath)
+    foreach ($field in 'canonical', 'saveDirectory', 'downloadedOldDepot', 'originalGameDirectory', 'oldSmokeGameDirectory', 'currentSmokeGameDirectory', 'originalSaveDirectory', 'oldSmokeSaveDirectory', 'currentSmokeSaveDirectory') {
+        Assert-ExistingDirectoryRootIsNotLink ([string]$State.$field) "Game-switch state $field"
+    }
 }
 
 function Get-StateTemporaryPath {
@@ -454,6 +541,10 @@ function Assert-StateImmutableMatch {
 function Read-StateDocument {
     param([Parameter(Mandatory)][string]$Path)
 
+    $stateItem = Get-Item -LiteralPath $Path -Force
+    if ($stateItem.LinkType -or (($stateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Game-switch state must not be a symlink or reparse point: $Path"
+    }
     try {
         $state = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
     } catch {
@@ -815,6 +906,7 @@ function New-SwitchState {
     $save = Get-NormalizedAbsolutePath $SaveDirectory
     $manifest = Get-NormalizedAbsolutePath $AppManifestPath
     $depot = Get-NormalizedAbsolutePath $DownloadedOldDepot
+    Assert-InputPathTopology $canonical $save $depot $manifest
     if (-not (Test-Path -LiteralPath $canonical -PathType Container)) {
         throw "Canonical game directory is missing: $canonical"
     }
@@ -824,6 +916,9 @@ function New-SwitchState {
     if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
         throw "Appmanifest is missing: $manifest"
     }
+    Assert-ExistingDirectoryRootIsNotLink $canonical 'Canonical game'
+    Assert-ExistingDirectoryRootIsNotLink $save 'Save'
+    Assert-ExistingDirectoryRootIsNotLink $depot 'Downloaded depot'
     foreach ($identifier in @($OldBuildId, $OldManifestId, $CurrentBuildId, $CurrentManifestId)) {
         if ($identifier -cnotmatch '^[0-9]+$') {
             throw "Build and manifest identifiers must contain decimal digits only: $identifier"

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
@@ -70,29 +71,37 @@ public sealed class GameSwitchTests
         "before-journal-restored",
     };
 
-    public static TheoryData<string, string, string> StableRestoreEntryPoints => new()
+    public static TheoryData<string, string> RestorePhaseEntryPoints => new()
     {
-        { "ActivateOld", "after-journal-prepared", "prepared" },
-        { "ActivateOld", "after-journal-original-game-preserved", "original-game-preserved" },
-        { "ActivateOld", "after-journal-originals-preserved", "originals-preserved" },
-        { "ActivateOld", "after-journal-old-copy-prepared", "old-copy-prepared" },
-        { "ActivateOld", "after-journal-old-active", "old-active" },
-        { "ActivateCurrent", "after-journal-old-game-preserved", "old-game-preserved" },
-        { "ActivateCurrent", "after-journal-old-save-preserved", "old-save-preserved" },
-        { "ActivateCurrent", "after-journal-current-copy-prepared", "current-copy-prepared" },
-        { "ActivateCurrent", "after-journal-current-smoke-active", "current-smoke-active" },
-    };
-
-    public static TheoryData<string, string> PendingRestoreEntryPoints => new()
-    {
-        { "ActivateOld", "before-journal-original-game-move-pending" },
-        { "ActivateOld", "before-journal-original-save-move-pending" },
-        { "ActivateOld", "before-journal-old-copy-preparing" },
-        { "ActivateOld", "before-journal-old-activate-pending" },
-        { "ActivateCurrent", "before-journal-old-deactivate-pending" },
-        { "ActivateCurrent", "before-journal-old-save-move-pending" },
-        { "ActivateCurrent", "before-journal-current-copy-preparing" },
-        { "ActivateCurrent", "before-journal-current-activate-pending" },
+        { "prepared", "activate-old" },
+        { "original-game-move-pending", "activate-old" },
+        { "original-game-preserved", "activate-old" },
+        { "original-save-move-pending", "activate-old" },
+        { "originals-preserved", "activate-old" },
+        { "old-copy-preparing", "activate-old" },
+        { "old-copy-prepared", "activate-old" },
+        { "old-activate-pending", "activate-old" },
+        { "old-active", "activate-old" },
+        { "old-deactivate-pending", "activate-current" },
+        { "old-game-preserved", "activate-current" },
+        { "old-save-move-pending", "activate-current" },
+        { "old-save-preserved", "activate-current" },
+        { "current-copy-preparing", "activate-current" },
+        { "current-copy-prepared", "activate-current" },
+        { "current-activate-pending", "activate-current" },
+        { "current-smoke-active", "activate-current" },
+        { "restore-old-game-pending", "restore-old" },
+        { "restore-old-game-preserved", "restore-old" },
+        { "restore-current-game-pending", "restore-current" },
+        { "restore-current-game-preserved", "restore-current" },
+        { "restore-no-active-game", "restore-no-active" },
+        { "restore-old-save-pending", "restore-old" },
+        { "restore-current-save-pending", "restore-current" },
+        { "restore-save-preserved", "restore-current" },
+        { "restore-original-game-pending", "restore-current" },
+        { "restore-original-game-restored", "restore-current" },
+        { "restore-original-save-pending", "restore-current" },
+        { "restored", "restore-current" },
     };
 
     [Fact]
@@ -172,23 +181,12 @@ public sealed class GameSwitchTests
     }
 
     [Theory]
-    [MemberData(nameof(StableRestoreEntryPoints))]
-    public void RestoreIsLegalFromEveryStableActivationPhase(string action, string crashPoint, string expectedPhase)
+    [MemberData(nameof(RestorePhaseEntryPoints))]
+    public void EveryPersistedPhaseCanReenterRestoreAndConverge(string phase, string route)
     {
         using Fixture fixture = new();
-        fixture.StopActivationAt(action, crashPoint);
-        Assert.Equal(expectedPhase, fixture.ReadState().GetProperty("phase").GetString());
-
-        fixture.RunSwitch("Restore").AssertSuccess();
-        fixture.AssertRestored();
-    }
-
-    [Theory]
-    [MemberData(nameof(PendingRestoreEntryPoints))]
-    public void RestoreReconcilesEveryPendingActivationPhase(string action, string crashPoint)
-    {
-        using Fixture fixture = new();
-        fixture.StopActivationAt(action, crashPoint);
+        fixture.StopAtPhase(phase, route);
+        Assert.Equal(phase, fixture.ReadState().GetProperty("phase").GetString());
 
         fixture.RunSwitch("Restore").AssertSuccess();
         fixture.AssertRestored();
@@ -262,6 +260,92 @@ public sealed class GameSwitchTests
         string[] entries = fixture.CurrentHashArguments.Append(fixture.CurrentHashArguments[0].Replace('/', '\\')).ToArray();
         fixture.RunSwitch("ActivateOld", expectedHashOverride: entries).AssertFailure("duplicate");
         Assert.True(Directory.Exists(fixture.Canonical));
+    }
+
+    [Fact]
+    public void SaveFingerprintRejectsDirectoryLinksBeforeWritingAJournal()
+    {
+        using Fixture fixture = new();
+        string target = Path.Combine(fixture.DirectoryPath, "linked-save-target");
+        Directory.CreateDirectory(target);
+        File.WriteAllText(Path.Combine(target, "linked.sav"), "must not be hidden from the fingerprint");
+        Directory.CreateSymbolicLink(Path.Combine(fixture.Save, "linked"), target);
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("links");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+    }
+
+    [Fact]
+    public void SaveFingerprintKeepsCaseDistinctPathsOnCaseSensitiveFilesystems()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using Fixture fixture = new();
+        File.WriteAllText(Path.Combine(fixture.Save, "a.sav"), "lower");
+        File.WriteAllText(Path.Combine(fixture.Save, "A.sav"), "upper");
+        string expected = Fixture.DirectoryFingerprint(fixture.Save);
+
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+
+        Assert.Equal(expected, fixture.ReadState().GetProperty("originalSaveFingerprint").GetString());
+        fixture.RunSwitch("Restore").AssertSuccess();
+    }
+
+    [Fact]
+    public void LoadedJournalPathTopologyIsRevalidatedBeforeMutation()
+    {
+        using Fixture fixture = new();
+        const string crashPoint = "after-journal-prepared";
+        fixture.RunSwitch("ActivateOld", crashPoint).AssertFailure(crashPoint);
+        JsonObject state = JsonNode.Parse(File.ReadAllText(fixture.State))!.AsObject();
+        state["downloadedOldDepot"] = fixture.Canonical;
+        File.WriteAllText(fixture.State, state.ToJsonString());
+
+        fixture.RunSwitch("Restore").AssertFailure("topology");
+
+        fixture.AssertOriginalTree();
+        Assert.Empty(Directory.EnumerateFileSystemEntries(fixture.DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
+    }
+
+    [Theory]
+    [InlineData("canonical")]
+    [InlineData("save")]
+    [InlineData("depot")]
+    public void ActivateOldRejectsLinkedTreeRootsBeforeMutation(string root)
+    {
+        using Fixture fixture = new();
+
+        fixture.RunLinkedRoot(root).AssertFailure("symlink");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+        Assert.Empty(Directory.EnumerateFileSystemEntries(fixture.DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
+    }
+
+    [Theory]
+    [InlineData("state-in-canonical")]
+    [InlineData("state-in-save")]
+    [InlineData("state-in-depot")]
+    [InlineData("canonical-equals-save")]
+    [InlineData("canonical-contains-save")]
+    [InlineData("save-contains-canonical")]
+    [InlineData("save-is-filesystem-root")]
+    [InlineData("canonical-equals-depot")]
+    [InlineData("save-equals-depot")]
+    public void ActivateOldRejectsOverlappingPathTopologyBeforeMutation(string scenario)
+    {
+        using Fixture fixture = new();
+
+        ProcessResult result = fixture.RunInvalidTopology(scenario, out string attemptedState);
+
+        result.AssertFailure("topology");
+        Assert.False(File.Exists(attemptedState));
+        fixture.AssertOriginalTree();
+        Assert.Empty(Directory.EnumerateFileSystemEntries(fixture.DirectoryPath, "*.modkit-*", SearchOption.TopDirectoryOnly));
     }
 
     [Fact]
@@ -343,13 +427,24 @@ public sealed class GameSwitchTests
         public IReadOnlyDictionary<string, string> OldHashes { get; }
         public IReadOnlyList<string> CurrentHashArguments { get; }
 
-        public ProcessResult RunSwitch(string action, string? crashPoint = null, IReadOnlyList<string>? expectedHashOverride = null)
+        public ProcessResult RunSwitch(
+            string action,
+            string? crashPoint = null,
+            IReadOnlyList<string>? expectedHashOverride = null,
+            string? statePathOverride = null,
+            string? canonicalOverride = null,
+            string? saveOverride = null,
+            string? depotOverride = null)
         {
             static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
-            StringBuilder invocation = new($"& {Quote(SwitchScript)} -Action {Quote(action)} -StatePath {Quote(State)}");
+            string selectedState = statePathOverride ?? State;
+            string selectedCanonical = canonicalOverride ?? Canonical;
+            string selectedSave = saveOverride ?? Save;
+            string selectedDepot = depotOverride ?? OldDepot;
+            StringBuilder invocation = new($"& {Quote(SwitchScript)} -Action {Quote(action)} -StatePath {Quote(selectedState)}");
             if (action == "ActivateOld")
             {
-                invocation.Append($" -CanonicalGameDirectory {Quote(Canonical)} -SaveDirectory {Quote(Save)} -AppManifestPath {Quote(AppManifest)} -DownloadedOldDepot {Quote(OldDepot)}");
+                invocation.Append($" -CanonicalGameDirectory {Quote(selectedCanonical)} -SaveDirectory {Quote(selectedSave)} -AppManifestPath {Quote(AppManifest)} -DownloadedOldDepot {Quote(selectedDepot)}");
                 invocation.Append(" -OldBuildId 23821227 -OldManifestId 7567480468616200523 -CurrentBuildId 24069957 -CurrentManifestId 2755117260250472086");
                 invocation.Append($" -ExpectedCurrentNativeHash @({string.Join(',', (expectedHashOverride ?? CurrentHashArguments).Select(Quote))})");
             }
@@ -357,6 +452,83 @@ public sealed class GameSwitchTests
             string driver = Path.Combine(DirectoryPath, $"switch-driver-{Guid.NewGuid():N}.ps1");
             File.WriteAllText(driver, invocation.ToString());
             return RunPowerShell(new[] { "-File", driver }, "FARMT2_SWITCH_FAIL_AT", crashPoint);
+        }
+
+        public ProcessResult RunInvalidTopology(string scenario, out string attemptedState)
+        {
+            attemptedState = State;
+            string canonical = Canonical;
+            string save = Save;
+            string depot = OldDepot;
+            switch (scenario)
+            {
+                case "state-in-canonical":
+                    attemptedState = Path.Combine(Canonical, "journal", "game-switch.json");
+                    break;
+                case "state-in-save":
+                    attemptedState = Path.Combine(Save, "game-switch.json");
+                    break;
+                case "state-in-depot":
+                    attemptedState = Path.Combine(OldDepot, "game-switch.json");
+                    break;
+                case "canonical-equals-save":
+                    save = Canonical;
+                    break;
+                case "canonical-contains-save":
+                    save = Path.Combine(Canonical, "nested-save");
+                    Directory.CreateDirectory(save);
+                    File.WriteAllText(Path.Combine(save, "nested.sav"), "nested save");
+                    break;
+                case "save-contains-canonical":
+                    save = DirectoryPath;
+                    break;
+                case "save-is-filesystem-root":
+                    save = Path.GetPathRoot(Canonical)!;
+                    break;
+                case "canonical-equals-depot":
+                    depot = Canonical;
+                    break;
+                case "save-equals-depot":
+                    depot = Save;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(scenario), scenario, "Unknown topology scenario.");
+            }
+            return RunSwitch(
+                "ActivateOld",
+                statePathOverride: attemptedState,
+                canonicalOverride: canonical,
+                saveOverride: save,
+                depotOverride: depot);
+        }
+
+        public ProcessResult RunLinkedRoot(string root)
+        {
+            string canonical = Canonical;
+            string save = Save;
+            string depot = OldDepot;
+            switch (root)
+            {
+                case "canonical":
+                    canonical = Path.Combine(DirectoryPath, "canonical-link");
+                    Directory.CreateSymbolicLink(canonical, Canonical);
+                    break;
+                case "save":
+                    save = Path.Combine(DirectoryPath, "save-link");
+                    Directory.CreateSymbolicLink(save, Save);
+                    break;
+                case "depot":
+                    depot = Path.Combine(DirectoryPath, "depot-link");
+                    Directory.CreateSymbolicLink(depot, OldDepot);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(root), root, "Unknown linked root.");
+            }
+            return RunSwitch(
+                "ActivateOld",
+                canonicalOverride: canonical,
+                saveOverride: save,
+                depotOverride: depot);
         }
 
         public void PrepareCurrentActive()
@@ -367,15 +539,43 @@ public sealed class GameSwitchTests
             RunSwitch("ActivateCurrent").AssertSuccess();
         }
 
-        public void StopActivationAt(string action, string crashPoint)
+        public void StopAtPhase(string phase, string route)
         {
-            if (action == "ActivateCurrent")
+            string crashPoint = $"after-journal-{phase}";
+            switch (route)
             {
-                RunSwitch("ActivateOld").AssertSuccess();
-                Directory.CreateDirectory(Save);
-                File.WriteAllText(Path.Combine(Save, "old-smoke.sav"), "old save");
+                case "activate-old":
+                    RunSwitch("ActivateOld", crashPoint).AssertFailure(crashPoint);
+                    break;
+                case "activate-current":
+                    RunSwitch("ActivateOld").AssertSuccess();
+                    CreateSmokeSave("old-smoke.sav");
+                    RunSwitch("ActivateCurrent", crashPoint).AssertFailure(crashPoint);
+                    break;
+                case "restore-old":
+                    RunSwitch("ActivateOld").AssertSuccess();
+                    CreateSmokeSave("old-smoke.sav");
+                    RunSwitch("Restore", crashPoint).AssertFailure(crashPoint);
+                    break;
+                case "restore-current":
+                    PrepareCurrentActive();
+                    CreateSmokeSave("current-smoke.sav");
+                    RunSwitch("Restore", crashPoint).AssertFailure(crashPoint);
+                    break;
+                case "restore-no-active":
+                    const string preparationPoint = "after-journal-originals-preserved";
+                    RunSwitch("ActivateOld", preparationPoint).AssertFailure(preparationPoint);
+                    RunSwitch("Restore", crashPoint).AssertFailure(crashPoint);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(route), route, "Unknown phase setup route.");
             }
-            RunSwitch(action, crashPoint).AssertFailure(crashPoint);
+        }
+
+        private void CreateSmokeSave(string name)
+        {
+            Directory.CreateDirectory(Save);
+            File.WriteAllText(Path.Combine(Save, name), "smoke save");
         }
 
         public JsonElement ReadState()
@@ -409,6 +609,14 @@ public sealed class GameSwitchTests
             }
             Assert.Equal("manifest must stay unchanged", File.ReadAllText(AppManifest));
             Assert.Equal("restored", ReadState().GetProperty("phase").GetString());
+        }
+
+        public void AssertOriginalTree()
+        {
+            Assert.Equal("current-exe", File.ReadAllText(Path.Combine(Canonical, "FarmTogether2.exe")));
+            Assert.Equal("original user tree", File.ReadAllText(Path.Combine(Canonical, "user-install.txt")));
+            Assert.Equal("original save", File.ReadAllText(Path.Combine(Save, "original.sav")));
+            Assert.Equal("manifest must stay unchanged", File.ReadAllText(AppManifest));
         }
 
         public void Dispose()
@@ -452,6 +660,21 @@ public sealed class GameSwitchTests
                 result.Add(relative, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar))))).ToLowerInvariant());
             }
             return result;
+        }
+
+        public static string DirectoryFingerprint(string root)
+        {
+            string vector = string.Join(
+                '\n',
+                Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                    .Select(path => new
+                    {
+                        Path = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/'),
+                        Hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant(),
+                    })
+                    .OrderBy(entry => entry.Path, StringComparer.Ordinal)
+                    .Select(entry => $"{entry.Path}\t{entry.Hash}"));
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(vector))).ToLowerInvariant();
         }
 
         private static ProcessResult RunPowerShell(IEnumerable<string> arguments, string environmentName, string? environmentValue)
