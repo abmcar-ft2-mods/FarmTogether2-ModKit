@@ -16,6 +16,12 @@ function Get-NormalizedPath([string]$Path) {
     return [System.IO.Path]::GetFullPath($Path)
 }
 
+function Stop-ForInjectedCrash([string]$Point) {
+    if ($env:FARMT2_MODKIT_TEST_FAIL_AT -ceq $Point) {
+        [System.Environment]::Exit(197)
+    }
+}
+
 function Get-LowerSha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -30,17 +36,33 @@ function Assert-RegularFile([string]$Path, [string]$Label) {
     }
 }
 
-function Invoke-TestFailure([string]$Point) {
-    if ($env:FARMT2_MODKIT_TEST_FAIL_AT -ceq $Point) {
-        throw "Injected failure at $Point."
+function Get-LowerSha256WithCrash([string]$Path, [string]$DuringPoint) {
+    if ($env:FARMT2_MODKIT_TEST_FAIL_AT -ceq $DuringPoint) {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            if ($stream.Length -gt 0) {
+                [void]$stream.ReadByte()
+            }
+            [System.Environment]::Exit(197)
+        } finally {
+            $stream.Dispose()
+        }
     }
+    return Get-LowerSha256 $Path
 }
 
 $sourcePath = Get-NormalizedPath $Source
 $destinationPath = Get-NormalizedPath $Destination
 $temporary = Get-NormalizedPath $TemporaryPath
 
-if ($sourcePath -ceq $destinationPath -or $sourcePath -ceq $temporary -or $destinationPath -ceq $temporary) {
+$pathComparison = if ($IsWindows) {
+    [System.StringComparison]::OrdinalIgnoreCase
+} else {
+    [System.StringComparison]::Ordinal
+}
+if ([string]::Equals($sourcePath, $destinationPath, $pathComparison) -or
+    [string]::Equals($sourcePath, $temporary, $pathComparison) -or
+    [string]::Equals($destinationPath, $temporary, $pathComparison)) {
     throw 'Source, Destination, and TemporaryPath must be distinct.'
 }
 
@@ -55,16 +77,26 @@ if ([string]::IsNullOrWhiteSpace($destinationParent) -or [string]::IsNullOrWhite
     throw 'Destination and TemporaryPath must have parent directories.'
 }
 
-$pathComparison = if ($IsWindows) {
-    [System.StringComparison]::OrdinalIgnoreCase
-} else {
-    [System.StringComparison]::Ordinal
-}
 if (-not [string]::Equals($destinationParent, $temporaryParent, $pathComparison)) {
     throw 'TemporaryPath must be in the exact Destination parent directory.'
 }
 if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
     throw "Destination parent directory does not exist: $destinationParent"
+}
+
+$destinationStem = [System.IO.Path]::GetFileNameWithoutExtension($destinationPath)
+$temporaryName = [System.IO.Path]::GetFileName($temporary)
+$temporaryPrefix = ".$destinationStem."
+if (-not $temporaryName.StartsWith($temporaryPrefix, $pathComparison) -or
+    -not $temporaryName.EndsWith('.tmp', $pathComparison) -or
+    $temporaryName.Length -le ($temporaryPrefix.Length + '.tmp'.Length)) {
+    throw "TemporaryPath is not attempt-qualified for Destination: $temporary"
+}
+$temporaryQualifier = $temporaryName.Substring(
+    $temporaryPrefix.Length,
+    $temporaryName.Length - $temporaryPrefix.Length - '.tmp'.Length)
+if ($temporaryQualifier -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    throw "TemporaryPath has an invalid attempt qualifier: $temporary"
 }
 
 $allowed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
@@ -109,17 +141,42 @@ if (Test-Path -LiteralPath $temporary) {
 }
 
 if (-not (Test-Path -LiteralPath $temporary)) {
-    Invoke-TestFailure 'before-stage-copy'
+    Stop-ForInjectedCrash 'before-stage-copy'
+    if ($env:FARMT2_MODKIT_TEST_FAIL_AT -ceq 'during-stage-copy') {
+        $sourceStream = [System.IO.File]::OpenRead($sourcePath)
+        try {
+            $temporaryStream = [System.IO.File]::Open(
+                $temporary,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None)
+            try {
+                $bytesToCopy = [Math]::Max(1L, [Math]::Floor($sourceStream.Length / 2))
+                $buffer = [byte[]]::new([Math]::Min(81920L, $bytesToCopy))
+                $read = $sourceStream.Read($buffer, 0, $buffer.Length)
+                if ($read -gt 0) {
+                    $temporaryStream.Write($buffer, 0, $read)
+                    $temporaryStream.Flush($true)
+                }
+                [System.Environment]::Exit(197)
+            } finally {
+                $temporaryStream.Dispose()
+            }
+        } finally {
+            $sourceStream.Dispose()
+        }
+    }
     Copy-Item -LiteralPath $sourcePath -Destination $temporary
-    Invoke-TestFailure 'after-stage-copy'
+    Stop-ForInjectedCrash 'after-stage-copy'
 }
 
 Assert-RegularFile $temporary 'TemporaryPath'
-$temporaryHash = Get-LowerSha256 $temporary
+Stop-ForInjectedCrash 'before-stage-hash'
+$temporaryHash = Get-LowerSha256WithCrash $temporary 'during-stage-hash'
 if ($temporaryHash -cne $ExpectedSha256) {
     throw "TemporaryPath SHA-256 mismatch: expected=$ExpectedSha256 actual=$temporaryHash"
 }
-Invoke-TestFailure 'after-stage-hash'
+Stop-ForInjectedCrash 'after-stage-hash'
 
 if ((Get-LowerSha256 $sourcePath) -cne $ExpectedSha256) {
     throw 'Source changed after staging.'
@@ -139,13 +196,16 @@ if (Test-Path -LiteralPath $destinationPath) {
     throw 'Destination became missing before promotion.'
 }
 
-Invoke-TestFailure 'before-atomic-move'
+Stop-ForInjectedCrash 'before-atomic-move'
 [System.IO.File]::Move($temporary, $destinationPath, $true)
-Invoke-TestFailure 'after-atomic-move'
+Stop-ForInjectedCrash 'during-atomic-move'
+Stop-ForInjectedCrash 'after-atomic-move'
 
 Assert-RegularFile $destinationPath 'Destination'
-$promotedHash = Get-LowerSha256 $destinationPath
+Stop-ForInjectedCrash 'before-destination-hash'
+$promotedHash = Get-LowerSha256WithCrash $destinationPath 'during-destination-hash'
 if ($promotedHash -cne $ExpectedSha256) {
     throw "Promoted Destination SHA-256 mismatch: expected=$ExpectedSha256 actual=$promotedHash"
 }
-Invoke-TestFailure 'after-destination-hash'
+Stop-ForInjectedCrash 'after-destination-hash'
+Stop-ForInjectedCrash 'before-caller-journal-promotion'

@@ -87,11 +87,18 @@ public sealed class AtomicFileTransitionTests
 
     [Theory]
     [InlineData("before-stage-copy")]
+    [InlineData("during-stage-copy")]
     [InlineData("after-stage-copy")]
+    [InlineData("before-stage-hash")]
+    [InlineData("during-stage-hash")]
     [InlineData("after-stage-hash")]
     [InlineData("before-atomic-move")]
+    [InlineData("during-atomic-move")]
     [InlineData("after-atomic-move")]
+    [InlineData("before-destination-hash")]
+    [InlineData("during-destination-hash")]
     [InlineData("after-destination-hash")]
+    [InlineData("before-caller-journal-promotion")]
     public void RerunConvergesAfterInjectedFileBoundaryFailure(string failurePoint)
     {
         using Fixture fixture = new();
@@ -101,6 +108,15 @@ public sealed class AtomicFileTransitionTests
 
         ProcessResult interrupted = fixture.Run(allowedCurrentSha256: allowed, failurePoint: failurePoint);
         Assert.NotEqual(0, interrupted.ExitCode);
+        string interruptedLive = fixture.DestinationHash();
+        Assert.True(
+            interruptedLive == allowed || interruptedLive == fixture.SourceHash(),
+            $"Unexpected live hash after {failurePoint}: {interruptedLive}");
+        if (failurePoint == "during-stage-copy")
+        {
+            Assert.True(File.Exists(fixture.Temporary));
+            Assert.NotEqual(fixture.SourceHash(), Sha256(fixture.Temporary));
+        }
 
         ProcessResult resumed = fixture.Run(allowedCurrentSha256: allowed);
         Assert.Equal(0, resumed.ExitCode);
@@ -122,6 +138,60 @@ public sealed class AtomicFileTransitionTests
         Assert.Equal(before, fixture.DestinationHash());
     }
 
+    [Fact]
+    public void RejectsNonAttemptQualifiedTemporaryWithoutChangingLiveFile()
+    {
+        using Fixture fixture = new(attemptQualifiedTemporary: false);
+        fixture.WriteSource("desired");
+        fixture.WriteDestination("original");
+        File.WriteAllText(fixture.Temporary, "must-be-preserved");
+        string liveBefore = fixture.DestinationHash();
+        string temporaryBefore = Sha256(fixture.Temporary);
+
+        ProcessResult result = fixture.Run(allowedCurrentSha256: liveBefore);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Equal(liveBefore, fixture.DestinationHash());
+        Assert.Equal(temporaryBefore, Sha256(fixture.Temporary));
+    }
+
+    [Fact]
+    public void SourceAndDestinationMustBeDistinct()
+    {
+        using Fixture fixture = new();
+        fixture.WriteSource("desired");
+
+        ProcessResult result = fixture.Run(destination: fixture.Source);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Equal(fixture.SourceHash(), Sha256(fixture.Source));
+    }
+
+    [Fact]
+    public void SourceAndDestinationCaseAliasesAreRejectedOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using Fixture fixture = new();
+        fixture.WriteSource("desired");
+        string alias = ToggleFileNameCase(fixture.Source);
+        string temporary = Path.Combine(Path.GetDirectoryName(fixture.Source)!, ".candidate.test-attempt.tmp");
+
+        ProcessResult result = fixture.Run(destination: alias, temporary: temporary);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Equal(fixture.SourceHash(), Sha256(fixture.Source));
+    }
+
+    private static string ToggleFileNameCase(string path)
+    {
+        string name = Path.GetFileName(path);
+        char first = name[0];
+        char toggled = char.IsUpper(first) ? char.ToLowerInvariant(first) : char.ToUpperInvariant(first);
+        return Path.Combine(Path.GetDirectoryName(path)!, toggled + name[1..]);
+    }
+
     private static string Sha256(string path)
     {
         using FileStream stream = File.OpenRead(path);
@@ -135,7 +205,7 @@ public sealed class AtomicFileTransitionTests
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), $"modkit-atomic-{Guid.NewGuid():N}");
 
-        public Fixture(bool temporaryInDestinationDirectory = true)
+        public Fixture(bool temporaryInDestinationDirectory = true, bool attemptQualifiedTemporary = true)
         {
             Directory.CreateDirectory(_root);
             string live = Path.Combine(_root, "live");
@@ -143,7 +213,7 @@ public sealed class AtomicFileTransitionTests
             Source = Path.Combine(_root, "candidate.dll");
             Destination = Path.Combine(live, "plugin.dll");
             Temporary = temporaryInDestinationDirectory
-                ? Path.Combine(live, ".plugin.test-attempt.tmp")
+                ? Path.Combine(live, attemptQualifiedTemporary ? ".plugin.test-attempt.tmp" : "scratch.tmp")
                 : Path.Combine(_root, ".plugin.test-attempt.tmp");
         }
 
@@ -159,15 +229,17 @@ public sealed class AtomicFileTransitionTests
         public ProcessResult Run(
             string? allowedCurrentSha256 = null,
             bool allowMissingCurrent = false,
-            string? failurePoint = null)
+            string? failurePoint = null,
+            string? destination = null,
+            string? temporary = null)
         {
             var arguments = new List<string>
             {
                 "-NoProfile", "-File", Script,
                 "-Source", Source,
-                "-Destination", Destination,
+                "-Destination", destination ?? Destination,
                 "-ExpectedSha256", SourceHash(),
-                "-TemporaryPath", Temporary
+                "-TemporaryPath", temporary ?? Temporary
             };
             if (allowedCurrentSha256 is not null)
             {
