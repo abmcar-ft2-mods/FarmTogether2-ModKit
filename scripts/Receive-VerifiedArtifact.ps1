@@ -156,13 +156,32 @@ function Remove-SafeDirectoryTree {
         return
     }
     Assert-SafeDirectory $Path 'Extraction temporary directory'
-    $items = @(Get-ChildItem -LiteralPath $Path -Force -Recurse)
-    foreach ($item in $items) {
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Extraction temporary directory contains a reparse point: $($item.FullName)"
+    Remove-SafeDirectoryContent $Path
+    [System.IO.Directory]::Delete($Path, $false)
+}
+
+function Remove-SafeDirectoryContent {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Internal mandatory cleanup must not be suppressible with WhatIf.')]
+    param([string]$Directory)
+
+    $children = @(Get-ChildItem -LiteralPath $Directory -Force)
+    foreach ($child in $children) {
+        $isReparsePoint = ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        if ($child -is [System.IO.DirectoryInfo]) {
+            if (-not $isReparsePoint) {
+                Remove-SafeDirectoryContent $child.FullName
+            }
+            [System.IO.Directory]::Delete($child.FullName, $false)
+        } elseif ($child -is [System.IO.FileInfo]) {
+            [System.IO.File]::Delete($child.FullName)
+        } elseif ($isReparsePoint) {
+            throw "Extraction temporary contains an unknown reparse point: $($child.FullName)"
+        } else {
+            throw "Extraction temporary contains an unsupported filesystem object: $($child.FullName)"
         }
     }
-    Remove-Item -LiteralPath $Path -Recurse -Force
 }
 
 function New-UniqueExtractionRoot {
@@ -203,33 +222,36 @@ function Get-TestSwitch([string]$Name) {
     return $true
 }
 
-function Wait-ForPromotionTestHook {
-    $signalPath = $env:FARMT2_MODKIT_TEST_PROMOTION_SIGNAL
-    $continuePath = $env:FARMT2_MODKIT_TEST_PROMOTION_CONTINUE
-    if ([string]::IsNullOrEmpty($signalPath) -and [string]::IsNullOrEmpty($continuePath)) {
+function Wait-ForReceiverTestHook(
+    [string]$Point,
+    [string]$ConfiguredPoint,
+    [string]$SignalPath,
+    [string]$ContinuePath
+) {
+    if ([string]::IsNullOrEmpty($ConfiguredPoint) -or $ConfiguredPoint -cne $Point) {
         return
     }
-    if ([string]::IsNullOrEmpty($signalPath) -or [string]::IsNullOrEmpty($continuePath)) {
-        throw 'Promotion test hook requires both signal and continue paths.'
-    }
 
-    $signal = Get-NormalizedPath $signalPath
-    $continue = Get-NormalizedPath $continuePath
-    Assert-SafeDirectory ([System.IO.Path]::GetDirectoryName($signal)) 'Promotion signal parent'
-    Assert-SafeDirectory ([System.IO.Path]::GetDirectoryName($continue)) 'Promotion continue parent'
-    if (Test-Path -LiteralPath $signal) {
-        throw "Promotion signal path already exists: $signal"
+    Assert-SafeDirectory ([System.IO.Path]::GetDirectoryName($SignalPath)) 'Receiver test signal parent'
+    Assert-SafeDirectory ([System.IO.Path]::GetDirectoryName($ContinuePath)) 'Receiver test continue parent'
+    if (Test-Path -LiteralPath $SignalPath) {
+        throw "Receiver test signal path already exists: $SignalPath"
     }
-    [System.IO.File]::WriteAllText($signal, 'ready')
+    $signalStream = [System.IO.File]::Open(
+        $SignalPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None)
+    $signalStream.Dispose()
 
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while (-not (Test-Path -LiteralPath $continue)) {
+    while (-not (Test-Path -LiteralPath $ContinuePath)) {
         if ([DateTime]::UtcNow -ge $deadline) {
-            throw 'Timed out waiting for the promotion test hook.'
+            throw "Timed out waiting for receiver test hook: $Point"
         }
         Start-Sleep -Milliseconds 10
     }
-    Assert-RegularFile $continue 'Promotion continue file'
+    Assert-RegularFile $ContinuePath 'Receiver test continue file'
 }
 
 function Get-PortableZipPath([System.IO.Compression.ZipArchiveEntry]$Entry) {
@@ -399,17 +421,18 @@ function Get-TreeManifest([string]$Root, [string]$Label) {
 
 function Assert-TreeManifestEqual(
     [System.Collections.Generic.SortedDictionary[string, string]]$Expected,
-    [System.Collections.Generic.SortedDictionary[string, string]]$Actual
+    [System.Collections.Generic.SortedDictionary[string, string]]$Actual,
+    [string]$Label = 'Destination tree'
 ) {
     if ($Expected.Count -ne $Actual.Count) {
-        throw "Destination tree entry count mismatch: expected=$($Expected.Count) actual=$($Actual.Count)"
+        throw "$Label entry count mismatch: expected=$($Expected.Count) actual=$($Actual.Count)"
     }
     foreach ($entry in $Expected.GetEnumerator()) {
         if (-not $Actual.ContainsKey($entry.Key)) {
-            throw "Destination tree is missing entry: $($entry.Key.Substring(2))"
+            throw "$Label is missing entry: $($entry.Key.Substring(2))"
         }
         if ($Actual[$entry.Key] -cne $entry.Value) {
-            throw "Destination tree hash mismatch: $($entry.Key.Substring(2))"
+            throw "$Label hash mismatch: $($entry.Key.Substring(2))"
         }
     }
 }
@@ -494,6 +517,8 @@ $allowTestLoopbackHttp = Get-TestSwitch 'FARMT2_MODKIT_TEST_ALLOW_LOOPBACK_HTTP'
 $skipTestLoopbackCertificateCheck = Get-TestSwitch `
     'FARMT2_MODKIT_TEST_SKIP_LOOPBACK_CERTIFICATE_CHECK'
 $archiveUriIsLoopback = Test-LoopbackUri $parsedArchiveUri
+$receiverTestSeamEnabled = $allowTestLoopbackHttp -and $archiveUriIsLoopback -and
+    $parsedArchiveUri.Scheme -ceq 'http'
 if ($parsedArchiveUri.Scheme -ceq 'http' -and
     (-not $allowTestLoopbackHttp -or -not $archiveUriIsLoopback)) {
     throw 'Artifact archive_download_url must use HTTPS; plain HTTP is allowed only by the loopback test seam.'
@@ -501,6 +526,51 @@ if ($parsedArchiveUri.Scheme -ceq 'http' -and
 if ($skipTestLoopbackCertificateCheck -and
     ($parsedArchiveUri.Scheme -cne 'https' -or -not $archiveUriIsLoopback)) {
     throw 'The certificate-check test seam is restricted to a loopback HTTPS archive_download_url.'
+}
+
+$testCrashPoint = $env:FARMT2_MODKIT_TEST_FAIL_AT
+if (-not [string]::IsNullOrEmpty($testCrashPoint)) {
+    if (-not $receiverTestSeamEnabled) {
+        throw 'Receiver crash injection is restricted to the explicit loopback HTTP test seam.'
+    }
+    if ($testCrashPoint -cne 'after-archive-verify') {
+        throw "Unsupported receiver crash-injection point: $testCrashPoint"
+    }
+}
+
+$testHookPoint = $env:FARMT2_MODKIT_TEST_HOOK_POINT
+$testHookSignal = $env:FARMT2_MODKIT_TEST_HOOK_SIGNAL
+$testHookContinue = $env:FARMT2_MODKIT_TEST_HOOK_CONTINUE
+$testHookValues = @($testHookPoint, $testHookSignal, $testHookContinue)
+$testHookConfiguredCount = @($testHookValues | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count
+if ($testHookConfiguredCount -gt 0) {
+    if ($testHookConfiguredCount -ne $testHookValues.Count) {
+        throw 'Receiver test hook requires point, signal, and continue values together.'
+    }
+    if (-not $receiverTestSeamEnabled) {
+        throw 'Receiver test hooks are restricted to the explicit loopback HTTP test seam.'
+    }
+    if ($testHookPoint -cne 'after-fresh-manifest' -and
+        $testHookPoint -cne 'after-existing-manifest') {
+        throw "Unsupported receiver test hook point: $testHookPoint"
+    }
+    $testHookSignal = Get-NormalizedPath $testHookSignal
+    $testHookContinue = Get-NormalizedPath $testHookContinue
+    $testHookSignalParent = [System.IO.Path]::GetDirectoryName($testHookSignal)
+    $testHookContinueParent = [System.IO.Path]::GetDirectoryName($testHookContinue)
+    if (-not [string]::Equals($testHookSignalParent, $archiveParent, $pathComparison) -or
+        -not [string]::Equals($testHookContinueParent, $archiveParent, $pathComparison)) {
+        throw 'Receiver test hook files must be direct children of ArchivePath parent.'
+    }
+    if ([string]::Equals($testHookSignal, $testHookContinue, $pathComparison) -or
+        [string]::Equals($testHookSignal, $archive, $pathComparison) -or
+        [string]::Equals($testHookContinue, $archive, $pathComparison)) {
+        throw 'Receiver test hook files and ArchivePath must be distinct.'
+    }
+} else {
+    $testHookPoint = $null
+    $testHookSignal = $null
+    $testHookContinue = $null
 }
 
 $expectedArchiveHash = $ExpectedDigest.Substring('sha256:'.Length)
@@ -620,13 +690,31 @@ try {
     $archiveStream.Dispose()
     $archiveStream = $null
 
-    Wait-ForPromotionTestHook
+    Wait-ForReceiverTestHook `
+        'after-fresh-manifest' $testHookPoint $testHookSignal $testHookContinue
     Assert-SafeDirectory $destinationParent 'Destination parent directory before promotion'
-    Assert-SafeDirectory $extractionRoot 'Extraction root before promotion'
+    $freshManifestAfterHook = Get-TreeManifest `
+        $extractionRoot 'Fresh extraction after validation'
+    Assert-TreeManifestEqual `
+        $freshManifest $freshManifestAfterHook 'Fresh extraction changed after validation'
     if (Test-Path -LiteralPath $destination) {
         $liveManifest = Get-TreeManifest $destination 'DestinationDirectory'
-        Assert-TreeManifestEqual $freshManifest $liveManifest
+        Assert-TreeManifestEqual $freshManifest $liveManifest 'DestinationDirectory'
+        Wait-ForReceiverTestHook `
+            'after-existing-manifest' $testHookPoint $testHookSignal $testHookContinue
+        $freshManifestBeforeReconciliation = Get-TreeManifest `
+            $extractionRoot 'Fresh extraction before destination reconciliation'
+        Assert-TreeManifestEqual `
+            $freshManifest $freshManifestBeforeReconciliation `
+            'Fresh extraction changed before destination reconciliation'
+        $liveManifestAfterHook = Get-TreeManifest `
+            $destination 'DestinationDirectory after validation'
+        Assert-TreeManifestEqual `
+            $freshManifest $liveManifestAfterHook 'DestinationDirectory changed during validation'
     } else {
+        if ($testHookPoint -ceq 'after-existing-manifest') {
+            throw 'The after-existing-manifest test hook requires an existing DestinationDirectory.'
+        }
         try {
             [System.IO.Directory]::Move($extractionRoot, $destination)
             $extractionRoot = $null
@@ -635,7 +723,7 @@ try {
                 throw
             }
             $liveManifest = Get-TreeManifest $destination 'Concurrent DestinationDirectory'
-            Assert-TreeManifestEqual $freshManifest $liveManifest
+            Assert-TreeManifestEqual $freshManifest $liveManifest 'Concurrent DestinationDirectory'
         }
     }
 } finally {

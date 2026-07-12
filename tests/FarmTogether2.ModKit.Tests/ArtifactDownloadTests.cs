@@ -10,7 +10,6 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Xunit;
-using Xunit.Sdk;
 
 namespace FarmTogether2.ModKit.Tests;
 
@@ -165,6 +164,26 @@ public sealed class ArtifactDownloadTests
         Assert.False(Directory.Exists(fixture.Destination));
     }
 
+    [WindowsFact]
+    public void RejectsArchiveParentJunctionAncestorWhenCapabilityIsAvailable()
+    {
+        using Fixture fixture = new();
+        string outside = Path.Combine(fixture.RootDirectory, "outside-junction-cache");
+        string outsideParent = Path.Combine(outside, "container");
+        Directory.CreateDirectory(outsideParent);
+        Directory.Delete(fixture.CacheRoot, recursive: true);
+        CreateDirectoryJunction(fixture.CacheRoot, outside);
+
+        ProcessResult result = fixture.Run();
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("reparse-point ancestor", result.Stderr, StringComparison.Ordinal);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(outsideParent));
+        Assert.Null(fixture.Server.RedirectAuthorization);
+        Assert.Equal(0, fixture.Server.DownloadCount);
+        Assert.False(Directory.Exists(fixture.Destination));
+    }
+
     [Fact]
     public void RejectsDestinationParentReparseAncestorBeforeAnyWrite()
     {
@@ -207,26 +226,14 @@ public sealed class ArtifactDownloadTests
     {
         using Fixture fixture = new();
         AssertDirectorySymbolicLinkSupportOrSkip(fixture.RootDirectory);
-        string signal = Path.Combine(fixture.RootDirectory, "promotion.ready");
-        string proceed = Path.Combine(fixture.RootDirectory, "promotion.continue");
+        string archiveParent = Path.GetDirectoryName(fixture.ArchivePath)!;
+        string signal = Path.Combine(archiveParent, "promotion.ready");
+        string proceed = Path.Combine(archiveParent, "promotion.continue");
         Task<ProcessResult> running = Task.Run(() => fixture.Run(
-            promotionSignalPath: signal,
-            promotionContinuePath: proceed));
-
-        DateTime deadline = DateTime.UtcNow.AddSeconds(15);
-        while (!File.Exists(signal) && !running.IsCompleted && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
-        if (!File.Exists(signal) && !running.IsCompleted)
-        {
-            File.WriteAllText(proceed, "continue");
-            ProcessResult timedOut = await running;
-            Assert.Fail("Receiver did not reach the promotion hook." + Environment.NewLine + timedOut.Stderr);
-        }
-        if (running.IsCompleted)
-        {
-            ProcessResult early = await running;
-            Assert.Fail("Receiver exited before the promotion hook." + Environment.NewLine + early.Stderr);
-        }
+            hookPoint: "after-fresh-manifest",
+            hookSignalPath: signal,
+            hookContinuePath: proceed));
+        await WaitForReceiverHookAsync(running, signal, proceed);
 
         string movedLive = Path.Combine(fixture.RootDirectory, "original-live");
         string outsideLive = Path.Combine(fixture.RootDirectory, "outside-live");
@@ -245,6 +252,143 @@ public sealed class ArtifactDownloadTests
     }
 
     [Theory]
+    [InlineData("file")]
+    [InlineData("symlink")]
+    public async Task RejectsFreshExtractionMutationAfterValidatedManifestAndCleansStaging(string mutation)
+    {
+        using Fixture fixture = new();
+        if (mutation == "symlink")
+            AssertFileSymbolicLinkSupportOrSkip(fixture.RootDirectory);
+        string archiveParent = Path.GetDirectoryName(fixture.ArchivePath)!;
+        string destinationParent = Path.GetDirectoryName(fixture.Destination)!;
+        string signal = Path.Combine(archiveParent, $"fresh-{mutation}.ready");
+        string proceed = Path.Combine(archiveParent, $"fresh-{mutation}.continue");
+        string outside = Path.Combine(fixture.RootDirectory, $"outside-{mutation}.bin");
+        File.WriteAllText(outside, "outside");
+        Task<ProcessResult> running = Task.Run(() => fixture.Run(
+            hookPoint: "after-fresh-manifest",
+            hookSignalPath: signal,
+            hookContinuePath: proceed));
+        await WaitForReceiverHookAsync(running, signal, proceed);
+
+        string extractionRoot = Assert.Single(Directory.EnumerateDirectories(
+            destinationParent,
+            $".{Path.GetFileName(fixture.Destination)}.extract-*"));
+        string stagedPayload = Path.Combine(extractionRoot, "payload", "data.bin");
+        if (mutation == "file")
+        {
+            File.WriteAllText(stagedPayload, "tampered");
+        }
+        else
+        {
+            File.Delete(stagedPayload);
+            File.CreateSymbolicLink(stagedPayload, outside);
+        }
+        File.WriteAllText(proceed, "continue");
+
+        ProcessResult result = await running;
+
+        Assert.NotEqual(0, result.ExitCode);
+        string expectedError = mutation == "file"
+            ? "Fresh extraction changed after validation hash mismatch: payload/data.bin"
+            : "Fresh extraction after validation contains a reparse point";
+        AssertStandardErrorContains(result, expectedError);
+        Assert.Equal("outside", File.ReadAllText(outside));
+        Assert.False(Directory.Exists(fixture.Destination));
+        Assert.Empty(Directory.EnumerateDirectories(
+            destinationParent,
+            $".{Path.GetFileName(fixture.Destination)}.extract-*"));
+    }
+
+    [Theory]
+    [InlineData("file")]
+    [InlineData("symlink")]
+    public async Task RejectsExistingDestinationMutationAfterManifestWithoutReplacingLiveTree(string mutation)
+    {
+        using Fixture fixture = new();
+        if (mutation == "symlink")
+            AssertFileSymbolicLinkSupportOrSkip(fixture.RootDirectory);
+        fixture.WriteValidDestination();
+        string archiveParent = Path.GetDirectoryName(fixture.ArchivePath)!;
+        string destinationParent = Path.GetDirectoryName(fixture.Destination)!;
+        string signal = Path.Combine(archiveParent, "existing.ready");
+        string proceed = Path.Combine(archiveParent, "existing.continue");
+        Task<ProcessResult> running = Task.Run(() => fixture.Run(
+            hookPoint: "after-existing-manifest",
+            hookSignalPath: signal,
+            hookContinuePath: proceed));
+        await WaitForReceiverHookAsync(running, signal, proceed);
+
+        string livePayload = Path.Combine(fixture.Destination, "payload", "data.bin");
+        string outside = Path.Combine(fixture.RootDirectory, $"existing-outside-{mutation}.bin");
+        File.WriteAllText(outside, "outside");
+        if (mutation == "file")
+        {
+            File.WriteAllText(livePayload, "changed-during-validation");
+        }
+        else
+        {
+            File.Delete(livePayload);
+            File.CreateSymbolicLink(livePayload, outside);
+        }
+        File.WriteAllText(proceed, "continue");
+
+        ProcessResult result = await running;
+
+        Assert.NotEqual(0, result.ExitCode);
+        string expectedError = mutation == "file"
+            ? "DestinationDirectory changed during validation hash mismatch: payload/data.bin"
+            : "DestinationDirectory after validation contains a reparse point";
+        AssertStandardErrorContains(result, expectedError);
+        if (mutation == "file")
+            Assert.Equal("changed-during-validation", File.ReadAllText(livePayload));
+        else
+            Assert.True((File.GetAttributes(livePayload) & FileAttributes.ReparsePoint) != 0);
+        Assert.Equal("outside", File.ReadAllText(outside));
+        Assert.Empty(Directory.EnumerateDirectories(
+            destinationParent,
+            $".{Path.GetFileName(fixture.Destination)}.extract-*"));
+    }
+
+    [Fact]
+    public void RejectsReceiverTestHookOutsideExplicitLoopbackHttpSeam()
+    {
+        using Fixture fixture = new() { UseHttpsRedirect = true };
+        string archiveParent = Path.GetDirectoryName(fixture.ArchivePath)!;
+        string signal = Path.Combine(archiveParent, "forbidden.ready");
+        string proceed = Path.Combine(archiveParent, "forbidden.continue");
+
+        ProcessResult result = fixture.Run(
+            allowLoopbackHttp: false,
+            skipLoopbackCertificateCheck: true,
+            hookPoint: "after-fresh-manifest",
+            hookSignalPath: signal,
+            hookContinuePath: proceed);
+
+        Assert.NotEqual(0, result.ExitCode);
+        AssertStandardErrorContains(result, "restricted to the explicit loopback HTTP test seam");
+        Assert.False(File.Exists(signal));
+        Assert.Null(fixture.Server.RedirectAuthorization);
+        Assert.Equal(0, fixture.Server.DownloadCount);
+    }
+
+    [Fact]
+    public void RejectsCrashInjectionOutsideExplicitLoopbackHttpSeam()
+    {
+        using Fixture fixture = new() { UseHttpsRedirect = true };
+
+        ProcessResult result = fixture.Run(
+            failurePoint: "after-archive-verify",
+            allowLoopbackHttp: false,
+            skipLoopbackCertificateCheck: true);
+
+        Assert.NotEqual(0, result.ExitCode);
+        AssertStandardErrorContains(result, "crash injection is restricted to the explicit loopback HTTP test seam");
+        Assert.Null(fixture.Server.RedirectAuthorization);
+        Assert.Equal(0, fixture.Server.DownloadCount);
+    }
+
+    [Theory]
     [InlineData("traversal", "dot path segment")]
     [InlineData("dot-segment", "dot path segment")]
     [InlineData("rooted", "absolute or UNC-rooted")]
@@ -252,8 +396,10 @@ public sealed class ArtifactDownloadTests
     [InlineData("drive", "drive-rooted")]
     [InlineData("ads", "alternate-data-stream colon")]
     [InlineData("duplicate", "duplicate normalized entry name")]
+    [InlineData("case-collision", "duplicate normalized entry name")]
     [InlineData("directory-entry", "directory entries are not allowed")]
     [InlineData("directory-attribute", "marked as a directory")]
+    [InlineData("windows-reparse", "marked as a reparse point")]
     [InlineData("file-directory-collision", "file/directory path collision")]
     [InlineData("symlink", "not a regular file")]
     public void RejectsUnsafeZipWithoutCreatingLiveDestination(string kind, string expectedError)
@@ -264,7 +410,7 @@ public sealed class ArtifactDownloadTests
         ProcessResult result = fixture.Run();
 
         Assert.NotEqual(0, result.ExitCode);
-        Assert.Contains(expectedError, result.Stderr, StringComparison.Ordinal);
+        AssertStandardErrorContains(result, expectedError);
         Assert.False(Directory.Exists(fixture.Destination));
         Assert.False(File.Exists(Path.Combine(fixture.RootDirectory, "escape.txt")));
         Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(fixture.Destination)!, "escape.txt")));
@@ -354,8 +500,10 @@ public sealed class ArtifactDownloadTests
         "drive" => CreateArchive(new ZipItem(@"C:\escape.txt", "drive")),
         "ads" => CreateArchive(new ZipItem("safe/file.txt:stream", "ads")),
         "duplicate" => CreateArchive(new ZipItem("dir/file.txt", "one"), new ZipItem(@"dir\file.txt", "two")),
+        "case-collision" => CreateArchive(new ZipItem("Dir/File.txt", "one"), new ZipItem("dir/file.txt", "two")),
         "directory-entry" => CreateArchive(new ZipItem("dir/", "")),
         "directory-attribute" => CreateArchive(new ZipItem("dir", "", (int)FileAttributes.Directory)),
+        "windows-reparse" => CreateArchive(new ZipItem("link", "target", (int)FileAttributes.ReparsePoint)),
         "file-directory-collision" => CreateArchive(new ZipItem("node", "file"), new ZipItem("node/child.txt", "child")),
         "symlink" => CreateArchive(new ZipItem("link", "target", (0xA000 | 0x1FF) << 16)),
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null)
@@ -378,6 +526,44 @@ public sealed class ArtifactDownloadTests
         return stream.ToArray();
     }
 
+    private static async Task WaitForReceiverHookAsync(
+        Task<ProcessResult> running,
+        string signalPath,
+        string continuePath)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!File.Exists(signalPath) && !running.IsCompleted && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        if (!File.Exists(signalPath) && !running.IsCompleted)
+        {
+            File.WriteAllText(continuePath, "continue");
+            ProcessResult timedOut = await running;
+            Assert.Fail("Receiver did not reach the requested test hook." + Environment.NewLine + timedOut.Stderr);
+        }
+        if (running.IsCompleted)
+        {
+            ProcessResult early = await running;
+            Assert.Fail("Receiver exited before the requested test hook." + Environment.NewLine + early.Stderr);
+        }
+    }
+
+    private static void AssertFileSymbolicLinkSupportOrSkip(string directory)
+    {
+        string target = Path.Combine(directory, $"symlink-probe-target-{Guid.NewGuid():N}");
+        string link = Path.Combine(directory, $"symlink-probe-link-{Guid.NewGuid():N}");
+        File.WriteAllText(target, "probe");
+        try
+        {
+            CreateFileSymbolicLinkOrSkip(link, target);
+        }
+        finally
+        {
+            if (File.Exists(link))
+                File.Delete(link);
+            File.Delete(target);
+        }
+    }
+
     private static void CreateFileSymbolicLinkOrSkip(string linkPath, string targetPath)
     {
         try
@@ -387,7 +573,7 @@ public sealed class ArtifactDownloadTests
         catch (Exception exception) when (exception is UnauthorizedAccessException or
                                           PlatformNotSupportedException or IOException)
         {
-            throw SkipException.ForSkip($"Symbolic links are unavailable: {exception.Message}");
+            Assert.Fail($"Symbolic links are required by this test: {exception.Message}");
         }
     }
 
@@ -400,7 +586,30 @@ public sealed class ArtifactDownloadTests
         catch (Exception exception) when (exception is UnauthorizedAccessException or
                                           PlatformNotSupportedException or IOException)
         {
-            throw SkipException.ForSkip($"Directory symbolic links are unavailable: {exception.Message}");
+            Assert.Fail($"Directory symbolic links are required by this test: {exception.Message}");
+        }
+    }
+
+    private static void CreateDirectoryJunction(string linkPath, string targetPath)
+    {
+        var startInfo = new ProcessStartInfo("cmd.exe")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add($"mklink /J \"{linkPath}\" \"{targetPath}\"");
+        using Process process = Process.Start(startInfo) ??
+            throw new InvalidOperationException("Unable to start cmd.exe for junction capability probe.");
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0 || !Directory.Exists(linkPath))
+        {
+            Assert.Fail(
+                $"Directory junctions are unavailable: exit={process.ExitCode} stdout={stdout} stderr={stderr}");
         }
     }
 
@@ -419,6 +628,14 @@ public sealed class ArtifactDownloadTests
                 Directory.Delete(link);
             Directory.Delete(target);
         }
+    }
+
+    private static void AssertStandardErrorContains(ProcessResult result, string expected)
+    {
+        string normalized = string.Join(
+            " ",
+            result.Stderr.Replace('|', ' ').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        Assert.True(normalized.Contains(expected, StringComparison.Ordinal), result.Stderr);
     }
 
     private static SortedDictionary<string, string> SnapshotTree(string directory)
@@ -446,6 +663,15 @@ public sealed class ArtifactDownloadTests
     private sealed record ZipItem(string Name, string Content, int? ExternalAttributes = null);
 
     private sealed record ProcessResult(int ExitCode, string Stdout, string Stderr);
+
+    public sealed class WindowsFactAttribute : FactAttribute
+    {
+        public WindowsFactAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+                Skip = "Windows junction coverage runs only on Windows.";
+        }
+    }
 
     private sealed class Fixture : IDisposable
     {
@@ -518,8 +744,9 @@ public sealed class ArtifactDownloadTests
             string? failurePoint = null,
             bool allowLoopbackHttp = true,
             bool skipLoopbackCertificateCheck = false,
-            string? promotionSignalPath = null,
-            string? promotionContinuePath = null)
+            string? hookPoint = null,
+            string? hookSignalPath = null,
+            string? hookContinuePath = null)
         {
             WriteMetadata();
             var arguments = new[]
@@ -549,18 +776,21 @@ public sealed class ArtifactDownloadTests
             startInfo.Environment.Remove("FARMT2_MODKIT_TEST_ALLOW_LOOPBACK_HTTP");
             startInfo.Environment.Remove("FARMT2_MODKIT_TEST_SKIP_LOOPBACK_CERTIFICATE_CHECK");
             startInfo.Environment.Remove("FARMT2_MODKIT_TEST_FAIL_AT");
-            startInfo.Environment.Remove("FARMT2_MODKIT_TEST_PROMOTION_SIGNAL");
-            startInfo.Environment.Remove("FARMT2_MODKIT_TEST_PROMOTION_CONTINUE");
+            startInfo.Environment.Remove("FARMT2_MODKIT_TEST_HOOK_POINT");
+            startInfo.Environment.Remove("FARMT2_MODKIT_TEST_HOOK_SIGNAL");
+            startInfo.Environment.Remove("FARMT2_MODKIT_TEST_HOOK_CONTINUE");
             if (allowLoopbackHttp)
                 startInfo.Environment["FARMT2_MODKIT_TEST_ALLOW_LOOPBACK_HTTP"] = "1";
             if (skipLoopbackCertificateCheck)
                 startInfo.Environment["FARMT2_MODKIT_TEST_SKIP_LOOPBACK_CERTIFICATE_CHECK"] = "1";
             if (failurePoint is not null)
                 startInfo.Environment["FARMT2_MODKIT_TEST_FAIL_AT"] = failurePoint;
-            if (promotionSignalPath is not null)
-                startInfo.Environment["FARMT2_MODKIT_TEST_PROMOTION_SIGNAL"] = promotionSignalPath;
-            if (promotionContinuePath is not null)
-                startInfo.Environment["FARMT2_MODKIT_TEST_PROMOTION_CONTINUE"] = promotionContinuePath;
+            if (hookPoint is not null)
+                startInfo.Environment["FARMT2_MODKIT_TEST_HOOK_POINT"] = hookPoint;
+            if (hookSignalPath is not null)
+                startInfo.Environment["FARMT2_MODKIT_TEST_HOOK_SIGNAL"] = hookSignalPath;
+            if (hookContinuePath is not null)
+                startInfo.Environment["FARMT2_MODKIT_TEST_HOOK_CONTINUE"] = hookContinuePath;
 
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start pwsh.");
             string stdout = process.StandardOutput.ReadToEnd();
