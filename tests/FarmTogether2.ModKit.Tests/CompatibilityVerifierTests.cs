@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Xunit;
 using Verifier = FarmTogether2.CompatibilityVerifier.CompatibilityVerifier;
 
@@ -98,6 +99,59 @@ public sealed class CompatibilityVerifierTests : IClassFixture<CompatibilityVeri
         VerificationReport report = Verifier.Verify(testCase.Options);
 
         Assert.Equal(1, report.Facts.RuntimeTargetsVerified);
+    }
+
+    [Theory]
+    [InlineData("Synthetic.DoesNotExist")]
+    [InlineData("Synthetic.PublicApi`1")]
+    public void MissingOptionalRuntimeTargetForRequestedModIsAllowed(string type)
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        testCase.SetRuntimeTarget(type, "System.Void Missing()", required: false);
+
+        VerificationReport report = Verifier.Verify(testCase.Options);
+
+        Assert.Equal(0, report.Facts.RuntimeTargetsVerified);
+    }
+
+    [Fact]
+    public void PresentOptionalRuntimeTargetForRequestedModIsCounted()
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        testCase.SetRuntimeTarget("Synthetic.PublicApi`1", "System.Void Map(TMethod)", required: false);
+
+        VerificationReport report = Verifier.Verify(testCase.Options);
+
+        Assert.Equal(1, report.Facts.RuntimeTargetsVerified);
+    }
+
+    [Fact]
+    public void DuplicateOptionalRuntimeTargetForRequestedModIsRejected()
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        testCase.SetRuntimeTarget("Synthetic.PublicApi`1", "System.Void Map(TMethod)", required: false);
+        MutateAssembly(testCase.AssemblyCSharp, module =>
+            module.GetType("Synthetic.PublicApi`1").Methods.Add(NewGenericMapMethod(module)));
+        testCase.RefreshSupportedBuilds();
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Verifier.Verify(testCase.Options));
+        Assert.Contains("runtime target", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void MissingRequiredRuntimeTargetForRequestedModIsRejected()
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        testCase.SetRuntimeTarget("Synthetic.PublicApi`1", "System.Void Map(TMethod)", required: true);
+        MutateAssembly(testCase.AssemblyCSharp, module =>
+        {
+            TypeDefinition type = module.GetType("Synthetic.PublicApi`1");
+            type.Methods.Remove(type.Methods.Single(method => method.Name == "Map"));
+        });
+        testCase.RefreshSupportedBuilds();
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Verifier.Verify(testCase.Options));
+        Assert.Contains("runtime target", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -243,6 +297,52 @@ public sealed class CompatibilityVerifierTests : IClassFixture<CompatibilityVeri
     }
 
     [Fact]
+    public void StubAndRealPluginTypeSpecificationsMustBeEquivalent()
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        MutateAssembly(testCase.RealPlugin, module =>
+        {
+            MethodDefinition probe = module.GetType("SyntheticMod.Plugin").Methods.Single(method => method.Name == "TypeSpecObject");
+            GenericInstanceType type = Assert.IsType<GenericInstanceType>(
+                probe.Body.Instructions.Single(instruction => instruction.OpCode == OpCodes.Castclass).Operand);
+            type.GenericArguments[0] = module.TypeSystem.Int32;
+        });
+        CompatibilityVerifierFixture.WritePlayerPackage(testCase.PlayerPackage, testCase.RealPlugin);
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Verifier.Verify(testCase.Options));
+        Assert.Contains("TypeSpec", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StubAndRealPluginMethodSpecificationsMustBeEquivalent()
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        MutateAssembly(testCase.RealPlugin, module =>
+        {
+            MethodDefinition probe = module.GetType("SyntheticMod.Plugin").Methods.Single(method => method.Name == "MethodSpecObject");
+            GenericInstanceMethod method = Assert.IsType<GenericInstanceMethod>(
+                probe.Body.Instructions.Single(instruction => instruction.OpCode == OpCodes.Call).Operand);
+            method.GenericArguments[0] = module.TypeSystem.Int32;
+        });
+        CompatibilityVerifierFixture.WritePlayerPackage(testCase.PlayerPackage, testCase.RealPlugin);
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Verifier.Verify(testCase.Options));
+        Assert.Contains("MethodSpec", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EquivalentTypeAndMethodSpecificationsAreAccepted()
+    {
+        using CompatibilityVerifierCase testCase = fixture.CreateCase();
+        Assert.Equal(2, CountMetadataRows(testCase.Options.StubPluginPath, TokenType.TypeSpec));
+        Assert.Equal(2, CountMetadataRows(testCase.Options.StubPluginPath, TokenType.MethodSpec));
+
+        VerificationReport report = Verifier.Verify(testCase.Options);
+
+        Assert.Equal("90000001", report.SteamBuildId);
+    }
+
+    [Fact]
     public void StubAndRealPluginAssemblyIdentitiesMustBeEquivalent()
     {
         using CompatibilityVerifierCase testCase = fixture.CreateCase();
@@ -313,6 +413,16 @@ public sealed class CompatibilityVerifierTests : IClassFixture<CompatibilityVeri
         return method;
     }
 
+    private static MethodDefinition NewGenericMapMethod(ModuleDefinition module)
+    {
+        MethodDefinition method = new("Map", MethodAttributes.Public, module.TypeSystem.Void);
+        GenericParameter parameter = new("TMethod", method);
+        method.GenericParameters.Add(parameter);
+        method.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, parameter));
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        return method;
+    }
+
     private static void MutateAssembly(string path, Action<ModuleDefinition> mutation)
     {
         string temporary = path + ".tmp";
@@ -322,6 +432,15 @@ public sealed class CompatibilityVerifierTests : IClassFixture<CompatibilityVeri
             module.Write(temporary);
         }
         File.Move(temporary, path, overwrite: true);
+    }
+
+    private static int CountMetadataRows(string path, TokenType tokenType)
+    {
+        using ModuleDefinition module = ModuleDefinition.ReadModule(path);
+        int count = 0;
+        while (module.LookupToken(new MetadataToken(tokenType, (uint)count + 1)) is not null)
+            count++;
+        return count;
     }
 
     private static void AddZipEntry(ZipArchive archive, string name, byte[] bytes)
@@ -506,10 +625,50 @@ public sealed class CompatibilityVerifierFixture : IDisposable
         run.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
         run.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, use));
         run.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        AddTypeSpecificationProbe(module, plugin, api, "TypeSpecInt32", module.TypeSystem.Int32);
+        AddTypeSpecificationProbe(module, plugin, api, "TypeSpecObject", module.TypeSystem.Object);
+        MethodDefinition genericTarget = new("GenericTarget", MethodAttributes.Private | MethodAttributes.Static, module.TypeSystem.Void);
+        genericTarget.GenericParameters.Add(new GenericParameter("T", genericTarget));
+        genericTarget.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        plugin.Methods.Add(genericTarget);
+        AddMethodSpecificationProbe(module, plugin, genericTarget, "MethodSpecInt32", module.TypeSystem.Int32);
+        AddMethodSpecificationProbe(module, plugin, genericTarget, "MethodSpecObject", module.TypeSystem.Object);
         plugin.Methods.Add(acceptMode);
         plugin.Methods.Add(run);
         module.Types.Add(plugin);
         assembly.Write(path);
+    }
+
+    private static void AddTypeSpecificationProbe(
+        ModuleDefinition module,
+        TypeDefinition plugin,
+        TypeReference genericType,
+        string name,
+        TypeReference argument)
+    {
+        GenericInstanceType instance = new(genericType);
+        instance.GenericArguments.Add(argument);
+        MethodDefinition probe = new(name, MethodAttributes.Private | MethodAttributes.Static, module.TypeSystem.Void);
+        probe.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+        probe.Body.Instructions.Add(Instruction.Create(OpCodes.Castclass, instance));
+        probe.Body.Instructions.Add(Instruction.Create(OpCodes.Pop));
+        probe.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        plugin.Methods.Add(probe);
+    }
+
+    private static void AddMethodSpecificationProbe(
+        ModuleDefinition module,
+        TypeDefinition plugin,
+        MethodReference genericMethod,
+        string name,
+        TypeReference argument)
+    {
+        GenericInstanceMethod instance = new(genericMethod);
+        instance.GenericArguments.Add(argument);
+        MethodDefinition probe = new(name, MethodAttributes.Private | MethodAttributes.Static, module.TypeSystem.Void);
+        probe.Body.Instructions.Add(Instruction.Create(OpCodes.Call, instance));
+        probe.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        plugin.Methods.Add(probe);
     }
 
     private static void WriteContract(string path)
@@ -545,7 +704,7 @@ public sealed class CompatibilityVerifierFixture : IDisposable
         File.WriteAllText(path, JsonSerializer.Serialize(contract), new UTF8Encoding(false));
     }
 
-    private static void WritePlayerPackage(string path, string realPlugin)
+    internal static void WritePlayerPackage(string path, string realPlugin)
     {
         using FileStream stream = File.Create(path);
         using ZipArchive archive = new(stream, ZipArchiveMode.Create);
@@ -623,6 +782,24 @@ public sealed class CompatibilityVerifierCase : IDisposable
     public string RealPlugin => Options.RealPluginPath;
     public string PlayerPackage => Options.PlayerPackagePath;
     public string Report => Options.ReportPath;
+
+    public void SetRuntimeTarget(string type, string signature, bool required)
+    {
+        JsonObject contract = JsonNode.Parse(File.ReadAllText(Options.ContractPath, Encoding.UTF8))!.AsObject();
+        contract["runtimeTargets"] = JsonSerializer.SerializeToNode(new[]
+        {
+            new
+            {
+                assembly = "Assembly-CSharp",
+                type,
+                kind = "method",
+                signature,
+                required,
+                modIds = new[] { Options.ModId }
+            }
+        });
+        File.WriteAllText(Options.ContractPath, contract.ToJsonString(), new UTF8Encoding(false));
+    }
 
     public string[] ToArguments() =>
     [

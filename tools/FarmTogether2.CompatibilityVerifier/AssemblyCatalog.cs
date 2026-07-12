@@ -105,8 +105,11 @@ internal sealed class AssemblyCatalog : IDisposable
             if (directMatches.Length > 1)
                 throw new InvalidDataException($"Runtime target '{target.Assembly}:{target.Type}:{target.Signature}' has duplicate direct contract entries.");
             bool? expectedStatic = directMatches.Length == 1 ? directMatches[0].IsStatic : null;
-            VerifyMember(target.Assembly, target.Type, target.Kind, target.Signature, expectedStatic, "runtime target");
-            runtimeCount++;
+            int matches = CountMemberMatches(target.Assembly, target.Type, target.Kind, target.Signature, expectedStatic, "runtime target");
+            if (matches > 1 || (target.Required && matches != 1))
+                throw new InvalidDataException($"Runtime target '{target.Assembly}:{target.Type}:{target.Signature}' resolved {matches} times instead of exactly once.");
+            if (matches == 1)
+                runtimeCount++;
         }
 
         return prior with
@@ -143,7 +146,23 @@ internal sealed class AssemblyCatalog : IDisposable
         bool? expectedStatic,
         string context)
     {
-        TypeDefinition type = ResolveType(assemblyName, declaringType, context);
+        int matches = CountMemberMatches(assemblyName, declaringType, kind, signature, expectedStatic, context);
+        if (matches != 1)
+            throw new InvalidDataException($"{context} '{assemblyName}:{declaringType}:{signature}' resolved {matches} times instead of exactly once.");
+    }
+
+    private int CountMemberMatches(
+        string assemblyName,
+        string declaringType,
+        string kind,
+        string signature,
+        bool? expectedStatic,
+        string context)
+    {
+        if (!ApprovedApi.Assemblies.ContainsKey(assemblyName))
+            throw new InvalidDataException($"{context} names unapproved assembly '{assemblyName}'.");
+        if (!types[assemblyName].TryGetValue(declaringType, out TypeDefinition? type))
+            return 0;
         List<bool> matches = kind switch
         {
             "method" => type.Methods
@@ -162,8 +181,7 @@ internal sealed class AssemblyCatalog : IDisposable
         };
         if (expectedStatic.HasValue)
             matches = matches.Where(isStatic => isStatic == expectedStatic.Value).ToList();
-        if (matches.Count != 1)
-            throw new InvalidDataException($"{context} '{assemblyName}:{declaringType}:{signature}' resolved {matches.Count} times instead of exactly once.");
+        return matches.Count;
     }
 
     private static string TypeKind(TypeDefinition type)

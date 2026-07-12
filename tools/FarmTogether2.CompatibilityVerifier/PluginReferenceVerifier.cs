@@ -33,9 +33,18 @@ internal static class PluginReferenceVerifier
             string[] realTypes = TypeReferences(real);
             RequireEquivalent(stubTypes, realTypes, "TypeRef");
 
+            string[] stubTypeSpecifications = MetadataSpecificationSignatures.TypeSpecifications(stub);
+            string[] realTypeSpecifications = MetadataSpecificationSignatures.TypeSpecifications(real);
+            RequireEquivalent(stubTypeSpecifications, realTypeSpecifications, "TypeSpec");
+
             string[] stubMembers = MemberReferences(stub);
             string[] realMembers = MemberReferences(real);
             RequireEquivalent(stubMembers, realMembers, "MemberRef");
+
+            string[] stubMethodSpecifications = MetadataSpecificationSignatures.MethodSpecifications(stub);
+            string[] realMethodSpecifications = MetadataSpecificationSignatures.MethodSpecifications(real);
+            RequireEquivalent(stubMethodSpecifications, realMethodSpecifications, "MethodSpec");
+
             (IReadOnlySet<string> typeKeys, IReadOnlySet<string> memberKeys) = VerifyExternalReferencesAgainstContract(stub, contract);
             return new PluginReferenceResult(stubAssemblies.Length, stubTypes.Length, stubMembers.Length, typeKeys, memberKeys);
         }
