@@ -249,8 +249,14 @@ function Invoke-Git([string[]]$Arguments, [string]$Label) {
 }
 
 function Invoke-GitProbe([string[]]$Arguments) {
-    $output = @(& git @Arguments 2>$null)
-    $exitCode = $LASTEXITCODE
+    $previousPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = @(& git @Arguments 2>$null)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previousPreference
+    }
     return [pscustomobject]@{
         Succeeded = $exitCode -eq 0
         Output = [string[]]$output

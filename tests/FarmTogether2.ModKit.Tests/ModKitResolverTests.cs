@@ -137,7 +137,7 @@ public sealed class ModKitResolverTests
         using Fixture fixture = new();
         fixture.WriteMatchingCacheWithDamagedTooling();
 
-        fixture.Run(failLiveGitOnce: true).AssertSuccess();
+        fixture.Run(failLiveGitOnce: true, nativeCommandErrorsStop: true).AssertSuccess();
 
         Assert.Equal(
             File.ReadAllBytes(fixture.AssetPath),
@@ -148,6 +148,7 @@ public sealed class ModKitResolverTests
             "tools",
             "FarmTogether2.ModKit.Tool",
             "FarmTogether2.ModKit.Tool.csproj")));
+        Assert.Equal("True", File.ReadAllText(fixture.NativePreferenceMarker));
         fixture.AssertNoResolverTemporaries();
     }
 
@@ -185,12 +186,56 @@ public sealed class ModKitResolverTests
     {
         using Fixture fixture = new();
         Dictionary<string, string> prior = SnapshotTree(fixture.RepositoryRoot);
-        string[] downloadsBefore = SnapshotResolverDownloadDirectories();
+        string[] downloadsBefore = SnapshotResolverDownloadDirectories(fixture.ResolverTemporaryRoot);
 
         fixture.Run(failurePoint: failurePoint).AssertFailure(failurePoint);
 
         Assert.Equal(prior, SnapshotTree(fixture.RepositoryRoot));
-        Assert.Equal(downloadsBefore, SnapshotResolverDownloadDirectories());
+        Assert.Equal(downloadsBefore, SnapshotResolverDownloadDirectories(fixture.ResolverTemporaryRoot));
+        fixture.AssertNoResolverTemporaries();
+    }
+
+    [Fact]
+    public async Task ExternalResolverTemporaryChurnDoesNotAffectFailureCleanup()
+    {
+        using Fixture fixture = new();
+        string external = Path.Combine(
+            Path.GetTempPath(),
+            $"farmtogether2-modkit-resolve-external-{Guid.NewGuid():N}");
+        string ready = Path.Combine(fixture.DirectoryPath, "release-download.ready");
+        string blocker = Path.Combine(fixture.DirectoryPath, "release-download.block");
+        Directory.CreateDirectory(external);
+        File.WriteAllText(blocker, "blocked", new UTF8Encoding(false));
+        Dictionary<string, string> prior = SnapshotTree(fixture.RepositoryRoot);
+        string[] downloadsBefore = SnapshotResolverDownloadDirectories(fixture.ResolverTemporaryRoot);
+        Task<ProcessResult> resolver = Task.Run(() => fixture.Run(
+            failurePoint: "after-download-verify",
+            releaseDownloadReady: ready,
+            releaseDownloadBlock: blocker));
+
+        bool downloadStarted = SpinWait.SpinUntil(() => File.Exists(ready), TimeSpan.FromSeconds(30));
+        bool downloadUsesFixtureRoot = downloadStarted && Directory.EnumerateDirectories(
+            fixture.ResolverTemporaryRoot,
+            "farmtogether2-modkit-resolve-*",
+            SearchOption.TopDirectoryOnly).Count() == 1;
+        try
+        {
+            if (downloadStarted)
+                Directory.Delete(external);
+        }
+        finally
+        {
+            File.Delete(blocker);
+            if (Directory.Exists(external))
+                Directory.Delete(external);
+        }
+        ProcessResult result = await resolver;
+        Assert.True(downloadStarted, "Resolver did not reach the coordinated Release download.");
+        Assert.True(downloadUsesFixtureRoot, "Resolver did not use the fixture-owned temporary root.");
+        result.AssertFailure("after-download-verify");
+
+        Assert.Equal(prior, SnapshotTree(fixture.RepositoryRoot));
+        Assert.Equal(downloadsBefore, SnapshotResolverDownloadDirectories(fixture.ResolverTemporaryRoot));
         fixture.AssertNoResolverTemporaries();
     }
 
@@ -287,8 +332,8 @@ public sealed class ModKitResolverTests
         return snapshot;
     }
 
-    private static string[] SnapshotResolverDownloadDirectories() => Directory
-        .EnumerateDirectories(Path.GetTempPath(), "farmtogether2-modkit-resolve-*", SearchOption.TopDirectoryOnly)
+    private static string[] SnapshotResolverDownloadDirectories(string temporaryRoot) => Directory
+        .EnumerateDirectories(temporaryRoot, "farmtogether2-modkit-resolve-*", SearchOption.TopDirectoryOnly)
         .Order(StringComparer.Ordinal)
         .ToArray();
 
@@ -303,6 +348,7 @@ public sealed class ModKitResolverTests
         public Fixture()
         {
             DirectoryPath = Path.Combine(Path.GetTempPath(), $"modkit-resolver-{Guid.NewGuid():N}");
+            ResolverTemporaryRoot = Path.Combine(DirectoryPath, "temp");
             RepositoryRoot = Path.Combine(DirectoryPath, "repository");
             ModKitRoot = Path.Combine(RepositoryRoot, ".modkit");
             Packages = Path.Combine(ModKitRoot, "packages");
@@ -312,11 +358,13 @@ public sealed class ModKitResolverTests
             AssetPath = Path.Combine(DirectoryPath, AssetName);
             GhLog = Path.Combine(DirectoryPath, "gh.log");
             GitLog = Path.Combine(DirectoryPath, "git.log");
+            NativePreferenceMarker = Path.Combine(DirectoryPath, "native-preference.txt");
             _shimDirectory = Path.Combine(DirectoryPath, "shim");
             _releaseJson = Path.Combine(DirectoryPath, "release.json");
             _referenceJson = Path.Combine(DirectoryPath, "reference.json");
             _secondReleaseJson = Path.Combine(DirectoryPath, "release-second.json");
             Directory.CreateDirectory(RepositoryRoot);
+            Directory.CreateDirectory(ResolverTemporaryRoot);
             Directory.CreateDirectory(_shimDirectory);
             CreateReferencePackage();
             _assetBytes = File.ReadAllBytes(AssetPath);
@@ -327,6 +375,7 @@ public sealed class ModKitResolverTests
         }
 
         public string DirectoryPath { get; }
+        public string ResolverTemporaryRoot { get; }
         public string RepositoryRoot { get; }
         public string ModKitRoot { get; }
         public string Packages { get; }
@@ -336,6 +385,7 @@ public sealed class ModKitResolverTests
         public string AssetPath { get; }
         public string GhLog { get; }
         public string GitLog { get; }
+        public string NativePreferenceMarker { get; }
 
         public void WritePriorCache()
         {
@@ -408,6 +458,9 @@ public sealed class ModKitResolverTests
             string? destination = null,
             bool useSecondRelease = false,
             bool failLiveGitOnce = false,
+            bool nativeCommandErrorsStop = false,
+            string? releaseDownloadReady = null,
+            string? releaseDownloadBlock = null,
             IEnumerable<string>? extraArguments = null)
         {
             ProcessStartInfo startInfo = new("pwsh")
@@ -416,21 +469,28 @@ public sealed class ModKitResolverTests
                 RedirectStandardError = true,
                 UseShellExecute = false
             };
-            foreach (string argument in new[]
-            {
-                "-NoLogo", "-NoProfile", "-File", Script,
+            List<string> resolverArguments =
+            [
                 "-LockFile", LockPath,
                 "-Destination", destination ?? Packages,
                 "-PropsOutput", Props
-            })
-            {
-                startInfo.ArgumentList.Add(argument);
-            }
+            ];
             if (extraArguments is not null)
+                resolverArguments.AddRange(extraArguments);
+            if (nativeCommandErrorsStop && extraArguments is not null)
+                throw new InvalidOperationException("Native preference runner does not accept extra resolver arguments.");
+            List<string> processArguments = ["-NoLogo", "-NoProfile", "-File"];
+            if (nativeCommandErrorsStop)
             {
-                foreach (string argument in extraArguments)
-                    startInfo.ArgumentList.Add(argument);
+                processArguments.Add(Path.Combine(_shimDirectory, "native-preference-runner.ps1"));
             }
+            else
+            {
+                processArguments.Add(Script);
+                processArguments.AddRange(resolverArguments);
+            }
+            foreach (string argument in processArguments)
+                startInfo.ArgumentList.Add(argument);
             startInfo.Environment["PATH"] = _shimDirectory + Path.PathSeparator +
                 (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
             startInfo.Environment["FAKE_GH_RELEASE_JSON"] = _releaseJson;
@@ -440,6 +500,17 @@ public sealed class ModKitResolverTests
             startInfo.Environment["FAKE_GIT_LOG"] = GitLog;
             startInfo.Environment["FAKE_GIT_SOURCE"] = Root;
             startInfo.Environment["FAKE_GIT_HEAD"] = fetchedHead;
+            startInfo.Environment["TMPDIR"] = ResolverTemporaryRoot;
+            startInfo.Environment["TMP"] = ResolverTemporaryRoot;
+            startInfo.Environment["TEMP"] = ResolverTemporaryRoot;
+            if (nativeCommandErrorsStop)
+            {
+                startInfo.Environment["FAKE_RESOLVER_SCRIPT"] = Script;
+                startInfo.Environment["FAKE_RESOLVER_LOCK_FILE"] = LockPath;
+                startInfo.Environment["FAKE_RESOLVER_DESTINATION"] = destination ?? Packages;
+                startInfo.Environment["FAKE_RESOLVER_PROPS_OUTPUT"] = Props;
+                startInfo.Environment["FAKE_NATIVE_PREFERENCE_MARKER"] = NativePreferenceMarker;
+            }
             if (useSecondRelease)
                 startInfo.Environment["FAKE_GH_SECOND_RELEASE_JSON"] = _secondReleaseJson;
             if (failurePoint is not null)
@@ -454,6 +525,10 @@ public sealed class ModKitResolverTests
                     DirectoryPath,
                     "live-git-failure.marker");
             }
+            if (releaseDownloadReady is not null)
+                startInfo.Environment["FAKE_GH_RELEASE_DOWNLOAD_READY"] = releaseDownloadReady;
+            if (releaseDownloadBlock is not null)
+                startInfo.Environment["FAKE_GH_RELEASE_DOWNLOAD_BLOCK"] = releaseDownloadBlock;
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh.");
             string stdout = process.StandardOutput.ReadToEnd();
             string stderr = process.StandardError.ReadToEnd();
@@ -463,6 +538,10 @@ public sealed class ModKitResolverTests
 
         public void AssertNoResolverTemporaries()
         {
+            Assert.Empty(Directory.EnumerateFileSystemEntries(
+                ResolverTemporaryRoot,
+                "farmtogether2-modkit-resolve-*",
+                SearchOption.TopDirectoryOnly));
             Assert.Empty(Directory.EnumerateFileSystemEntries(RepositoryRoot, ".modkit-resolve-*.preparing", SearchOption.TopDirectoryOnly));
             if (!Directory.Exists(ModKitRoot))
                 return;
@@ -546,6 +625,27 @@ public sealed class ModKitResolverTests
 
         private void WriteShims()
         {
+            File.WriteAllText(
+                Path.Combine(_shimDirectory, "native-preference-runner.ps1"),
+                """
+                $ErrorActionPreference = 'Stop'
+                $PSNativeCommandUseErrorActionPreference = $true
+                try {
+                    & $env:FAKE_RESOLVER_SCRIPT `
+                        -LockFile $env:FAKE_RESOLVER_LOCK_FILE `
+                        -Destination $env:FAKE_RESOLVER_DESTINATION `
+                        -PropsOutput $env:FAKE_RESOLVER_PROPS_OUTPUT
+                } finally {
+                    [IO.File]::WriteAllText(
+                        $env:FAKE_NATIVE_PREFERENCE_MARKER,
+                        [string]$PSNativeCommandUseErrorActionPreference)
+                }
+                if (-not $PSNativeCommandUseErrorActionPreference) {
+                    throw 'Resolver changed PSNativeCommandUseErrorActionPreference in its caller.'
+                }
+                """.Replace("\r\n", "\n", StringComparison.Ordinal),
+                new UTF8Encoding(false));
+
             string ghScript = Path.Combine(_shimDirectory, "gh-shim.ps1");
             File.WriteAllText(ghScript, """
                 $ErrorActionPreference = 'Stop'
@@ -563,6 +663,12 @@ public sealed class ModKitResolverTests
                 if ($args[0] -ceq 'release' -and $args[1] -ceq 'download') {
                     $directoryIndex = [Array]::IndexOf($args, '--dir')
                     if ($directoryIndex -lt 0) { exit 65 }
+                    if ($env:FAKE_GH_RELEASE_DOWNLOAD_READY) {
+                        [IO.File]::WriteAllText($env:FAKE_GH_RELEASE_DOWNLOAD_READY, 'ready')
+                    }
+                    while ($env:FAKE_GH_RELEASE_DOWNLOAD_BLOCK -and (Test-Path -LiteralPath $env:FAKE_GH_RELEASE_DOWNLOAD_BLOCK)) {
+                        Start-Sleep -Milliseconds 10
+                    }
                     Copy-Item -LiteralPath $env:FAKE_GH_ASSET -Destination (Join-Path $args[$directoryIndex + 1] (Split-Path -Leaf $env:FAKE_GH_ASSET))
                     exit 0
                 }
