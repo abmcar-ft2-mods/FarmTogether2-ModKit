@@ -52,6 +52,77 @@ internal static class Program
                         _ = LockFileResolver.Read(file);
                         break;
                     }
+                case ("mod-package", "write"):
+                    {
+                        string modConfig = options.RequireSingle("--mod-config");
+                        string repositoryRoot = options.RequireSingle("--repository-root");
+                        string pluginDll = options.RequireSingle("--plugin-dll");
+                        string pluginPdb = options.RequireSingle("--plugin-pdb");
+                        string msbuildVersion = options.RequireSingle("--msbuild-version");
+                        string output = options.RequireSingle("--output");
+                        options.AssertAllConsumed();
+                        ModPackager.Write(modConfig, repositoryRoot, pluginDll, pluginPdb, msbuildVersion, output);
+                        break;
+                    }
+                case ("mod-config", "verify"):
+                    {
+                        string file = options.RequireSingle("--file");
+                        options.AssertAllConsumed();
+                        _ = StrictModJson.Read(file);
+                        break;
+                    }
+                case ("mod-package", "verify"):
+                    {
+                        string modConfig = options.RequireSingle("--mod-config");
+                        string artifacts = options.RequireSingle("--artifacts");
+                        options.AssertAllConsumed();
+                        ModPackager.Verify(modConfig, artifacts);
+                        break;
+                    }
+                case ("candidate", "write-mod"):
+                    {
+                        string directory = options.RequireSingle("--directory");
+                        string artifactName = options.RequireSingle("--artifact-name");
+                        string assemblyName = options.RequireSingle("--assembly-name");
+                        string version = options.RequireSingle("--version");
+                        string commit = options.RequireSingle("--commit");
+                        long runId = options.RequirePositiveInt64("--run-id");
+                        options.AssertAllConsumed();
+                        CandidateVerifier.WriteMod(directory, artifactName, assemblyName, version, commit, runId);
+                        break;
+                    }
+                case ("candidate", "write-reference"):
+                    {
+                        string directory = options.RequireSingle("--directory");
+                        string artifactName = options.RequireSingle("--artifact-name");
+                        string packageId = options.RequireSingle("--package-id");
+                        string packageVersion = options.RequireSingle("--package-version");
+                        string commit = options.RequireSingle("--commit");
+                        long runId = options.RequirePositiveInt64("--run-id");
+                        options.AssertAllConsumed();
+                        CandidateVerifier.WriteReference(directory, artifactName, packageId, packageVersion, commit, runId);
+                        break;
+                    }
+                case ("candidate", "verify"):
+                    {
+                        string directory = options.RequireSingle("--directory");
+                        string kind = options.RequireSingle("--kind");
+                        string expectedCommit = options.RequireSingle("--expected-commit");
+                        long expectedRunId = options.RequirePositiveInt64("--expected-run-id");
+                        string expectedArtifactName = options.RequireSingle("--expected-artifact-name");
+                        options.AssertAllConsumed();
+                        CandidateVerifier.Verify(directory, kind, expectedCommit, expectedRunId, expectedArtifactName);
+                        break;
+                    }
+                case ("candidate", "verify-published"):
+                    {
+                        string published = options.RequireSingle("--published-directory");
+                        string candidate = options.RequireSingle("--candidate-directory");
+                        string kind = options.RequireSingle("--kind");
+                        options.AssertAllConsumed();
+                        CandidateVerifier.VerifyPublished(published, candidate, kind);
+                        break;
+                    }
                 default:
                     throw new ArgumentException($"Unknown command '{args[0]} {args[1]}'.");
             }
@@ -104,6 +175,15 @@ internal sealed class CommandOptions
         if (!_values.TryGetValue(name, out List<string>? values) || values.Count == 0 || values.Any(string.IsNullOrEmpty))
             throw new ArgumentException($"Option {name} must occur at least once with non-empty values.");
         return values;
+    }
+
+    public long RequirePositiveInt64(string name)
+    {
+        string value = RequireSingle(name);
+        if (!long.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out long result) ||
+            result <= 0 || result.ToString(System.Globalization.CultureInfo.InvariantCulture) != value)
+            throw new ArgumentException($"Option {name} must be a canonical positive decimal integer.");
+        return result;
     }
 
     public ModKitLock ToLockFile() => new(

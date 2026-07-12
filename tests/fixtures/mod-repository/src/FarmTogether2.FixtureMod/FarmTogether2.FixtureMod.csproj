@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>FarmTogether2.FixtureMod</AssemblyName>
+    <Version>1.0.0</Version>
+    <IsFarmTogether2Plugin>true</IsFarmTogether2Plugin>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,7 @@
+<Project>
+  <Target Name="RejectDirectFarmTogether2Deployment"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(DeployToGame)' == 'true'">
+    <Error Text="DeployToGame is available only through the locked scripts/build.ps1 wrapper, which performs verified atomic deployment after all tests and guards pass." />
+  </Target>
+</Project>

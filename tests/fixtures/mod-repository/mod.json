@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "com.abmcar.farmtogether2.fixturemod",
+  "displayName": "FarmTogether2.FixtureMod",
+  "assemblyName": "FarmTogether2.FixtureMod",
+  "version": "1.0.0",
+  "project": "src/FarmTogether2.FixtureMod/FarmTogether2.FixtureMod.csproj",
+  "testProjects": [],
+  "guardScripts": ["tests/RegressionGuards.ps1"],
+  "installReadme": "packaging/README_安装说明.txt",
+  "supportedSteamBuild": "24069957"
+}

@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    uses: abmcar/FarmTogether2-ModKit/.github/workflows/reusable-mod-build.yml@0123456789abcdef0123456789abcdef01234567
+    with:
+      modkit-commit: 0123456789abcdef0123456789abcdef01234567
+      game-api-mode: Hosted
+      configuration: Release
+      candidate-kind: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'candidate' || 'preview' }}
+      retention-days: 7

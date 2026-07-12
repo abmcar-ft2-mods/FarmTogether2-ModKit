@@ -1,0 +1,17 @@
+**/bin/
+**/obj/
+.artifacts/
+artifacts/
+.audit/
+.modkit/
+.vs/
+TestResults/
+*.dll
+*.pdb
+*.zip
+*.nupkg
+*.dmp
+*.dump
+*.log
+*.user
+*.suo

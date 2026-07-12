@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.dll binary
+*.pdb binary
+*.zip binary
+*.nupkg binary
