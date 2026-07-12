@@ -12,4 +12,12 @@
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
     <PackageReference Include="YamlDotNet" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Stubs/Il2Cppmscorlib/Il2Cppmscorlib.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Stubs/MilkstoneUnityExtensions/MilkstoneUnityExtensions.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Stubs/UnityEngine.CoreModule/UnityEngine.CoreModule.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Stubs/UnityEngine.IMGUIModule/UnityEngine.IMGUIModule.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Stubs/UnityEngine.InputLegacyModule/UnityEngine.InputLegacyModule.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Stubs/UnityEngine.TextRenderingModule/UnityEngine.TextRenderingModule.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
 </Project>

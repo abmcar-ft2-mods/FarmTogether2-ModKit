@@ -1,15 +1,21 @@
 namespace UnityEngine;
 
+#pragma warning disable CS0660, CS0661
 public class Object : Il2CppSystem.Object
 {
     public Object(IntPtr pointer) : base(pointer) { }
     public int GetInstanceID() => throw new NotSupportedException("Compile-time reference only.");
+    public static bool operator ==(Object? left, Object? right) =>
+        throw new NotSupportedException("Compile-time reference only.");
+    public static bool operator !=(Object? left, Object? right) =>
+        throw new NotSupportedException("Compile-time reference only.");
 }
+#pragma warning restore CS0660, CS0661
 
 public class Component : Object
 {
     public Component(IntPtr pointer) : base(pointer) { }
-    public T GetComponentInParent<T>() where T : Component =>
+    public T GetComponentInParent<T>() =>
         throw new NotSupportedException("Compile-time reference only.");
 }
 

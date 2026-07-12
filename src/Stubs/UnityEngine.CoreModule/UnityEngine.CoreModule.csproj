@@ -7,7 +7,7 @@
     <Version>0.0.0</Version>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../Il2Cppmscorlib/Il2Cppmscorlib.csproj" />
+    <ProjectReference Include="../Il2Cppmscorlib/Il2Cppmscorlib.csproj"><Private>false</Private></ProjectReference>
     <PackageReference Include="Il2CppInterop.Runtime" PrivateAssets="all" />
   </ItemGroup>
 </Project>

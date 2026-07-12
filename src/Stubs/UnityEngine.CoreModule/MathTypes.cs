@@ -58,7 +58,7 @@ public struct Color
     public static Color white => throw new NotSupportedException("Compile-time reference only.");
 }
 
-public static class Mathf
+public struct Mathf
 {
     public static float Clamp(float value, float min, float max) =>
         throw new NotSupportedException("Compile-time reference only.");

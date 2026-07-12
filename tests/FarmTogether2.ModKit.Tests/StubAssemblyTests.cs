@@ -27,11 +27,18 @@ public sealed class StubAssemblyTests
         using ModuleDefinition module = ModuleDefinition.ReadModule(Path.Combine(
             Root, "src/Stubs/UnityEngine.CoreModule/bin/Release/net6.0/UnityEngine.CoreModule.dll"));
         Assert.Equal(new Version(0, 0, 0, 0), module.Assembly.Name.Version);
+        TypeDefinition unityObject = module.GetType("UnityEngine.Object");
+        Assert.Contains(unityObject.Methods, x => x.Name == "op_Equality" && x.IsSpecialName && x.IsStatic);
+        Assert.Contains(unityObject.Methods, x => x.Name == "op_Inequality" && x.IsSpecialName && x.IsStatic);
         Assert.Equal("UnityEngine.Behaviour", module.GetType("UnityEngine.MonoBehaviour").BaseType.FullName);
-        Assert.Contains(module.GetType("UnityEngine.Component").Methods,
+        MethodDefinition getComponentInParent = Assert.Single(module.GetType("UnityEngine.Component").Methods,
             x => x.Name == "GetComponentInParent" && x.HasGenericParameters && x.Parameters.Count == 0);
+        Assert.Empty(Assert.Single(getComponentInParent.GenericParameters).Constraints);
         Assert.Contains(module.GetType("UnityEngine.Vector2").Properties, x => x.Name == "magnitude");
         Assert.Contains(module.GetType("UnityEngine.Texture2D").Properties, x => x.Name == "whiteTexture");
+        TypeDefinition mathf = module.GetType("UnityEngine.Mathf");
+        Assert.True(mathf.IsValueType);
+        Assert.Equal("System.ValueType", mathf.BaseType.FullName);
         Assert.Equal(289, module.GetType("UnityEngine.KeyCode").Fields.Single(x => x.Name == "F8").Constant);
     }
 
