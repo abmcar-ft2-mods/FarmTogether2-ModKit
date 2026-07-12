@@ -70,6 +70,31 @@ public sealed class GameSwitchTests
         "before-journal-restored",
     };
 
+    public static TheoryData<string, string, string> StableRestoreEntryPoints => new()
+    {
+        { "ActivateOld", "after-journal-prepared", "prepared" },
+        { "ActivateOld", "after-journal-original-game-preserved", "original-game-preserved" },
+        { "ActivateOld", "after-journal-originals-preserved", "originals-preserved" },
+        { "ActivateOld", "after-journal-old-copy-prepared", "old-copy-prepared" },
+        { "ActivateOld", "after-journal-old-active", "old-active" },
+        { "ActivateCurrent", "after-journal-old-game-preserved", "old-game-preserved" },
+        { "ActivateCurrent", "after-journal-old-save-preserved", "old-save-preserved" },
+        { "ActivateCurrent", "after-journal-current-copy-prepared", "current-copy-prepared" },
+        { "ActivateCurrent", "after-journal-current-smoke-active", "current-smoke-active" },
+    };
+
+    public static TheoryData<string, string> PendingRestoreEntryPoints => new()
+    {
+        { "ActivateOld", "before-journal-original-game-move-pending" },
+        { "ActivateOld", "before-journal-original-save-move-pending" },
+        { "ActivateOld", "before-journal-old-copy-preparing" },
+        { "ActivateOld", "before-journal-old-activate-pending" },
+        { "ActivateCurrent", "before-journal-old-deactivate-pending" },
+        { "ActivateCurrent", "before-journal-old-save-move-pending" },
+        { "ActivateCurrent", "before-journal-current-copy-preparing" },
+        { "ActivateCurrent", "before-journal-current-activate-pending" },
+    };
+
     [Fact]
     public void ActivateSwitchAndRestorePreserveExactTreesAndFingerprintVector()
     {
@@ -142,6 +167,29 @@ public sealed class GameSwitchTests
         File.WriteAllText(Path.Combine(fixture.Save, "current-smoke.sav"), "current save");
 
         fixture.RunSwitch("Restore", crashPoint).AssertFailure(crashPoint);
+        fixture.RunSwitch("Restore").AssertSuccess();
+        fixture.AssertRestored();
+    }
+
+    [Theory]
+    [MemberData(nameof(StableRestoreEntryPoints))]
+    public void RestoreIsLegalFromEveryStableActivationPhase(string action, string crashPoint, string expectedPhase)
+    {
+        using Fixture fixture = new();
+        fixture.StopActivationAt(action, crashPoint);
+        Assert.Equal(expectedPhase, fixture.ReadState().GetProperty("phase").GetString());
+
+        fixture.RunSwitch("Restore").AssertSuccess();
+        fixture.AssertRestored();
+    }
+
+    [Theory]
+    [MemberData(nameof(PendingRestoreEntryPoints))]
+    public void RestoreReconcilesEveryPendingActivationPhase(string action, string crashPoint)
+    {
+        using Fixture fixture = new();
+        fixture.StopActivationAt(action, crashPoint);
+
         fixture.RunSwitch("Restore").AssertSuccess();
         fixture.AssertRestored();
     }
@@ -317,6 +365,17 @@ public sealed class GameSwitchTests
             Directory.CreateDirectory(Save);
             File.WriteAllText(Path.Combine(Save, "old-smoke.sav"), "old save");
             RunSwitch("ActivateCurrent").AssertSuccess();
+        }
+
+        public void StopActivationAt(string action, string crashPoint)
+        {
+            if (action == "ActivateCurrent")
+            {
+                RunSwitch("ActivateOld").AssertSuccess();
+                Directory.CreateDirectory(Save);
+                File.WriteAllText(Path.Combine(Save, "old-smoke.sav"), "old save");
+            }
+            RunSwitch(action, crashPoint).AssertFailure(crashPoint);
         }
 
         public JsonElement ReadState()

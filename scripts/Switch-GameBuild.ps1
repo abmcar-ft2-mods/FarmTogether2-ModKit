@@ -406,7 +406,7 @@ function Test-AllowedTransition {
         return $true
     }
     $allowed = @{
-        'prepared' = @('original-game-move-pending', 'restore-no-active-game')
+        'prepared' = @('original-game-move-pending', 'restore-original-game-restored')
         'original-game-move-pending' = @('original-game-preserved')
         'original-game-preserved' = @('original-save-move-pending', 'originals-preserved', 'restore-no-active-game')
         'original-save-move-pending' = @('originals-preserved')
@@ -527,6 +527,7 @@ function Write-StatePhase {
     [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
     Invoke-OperationPoint "before-journal-$Phase"
     [IO.File]::Move($temporary, $StatePath, (Test-Path -LiteralPath $StatePath))
+    Invoke-OperationPoint "after-journal-$Phase"
 }
 
 function Write-InitialState {
@@ -543,6 +544,7 @@ function Write-InitialState {
     [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
     Invoke-OperationPoint 'before-journal-prepared'
     [IO.File]::Move($temporary, $StatePath, $false)
+    Invoke-OperationPoint 'after-journal-prepared'
 }
 
 function Assert-PathAbsent {
@@ -1078,14 +1080,14 @@ function Invoke-Restore {
             }
             'restore-old-game-preserved' { Write-StatePhase $state 'restore-old-save-pending' }
             'restore-current-game-preserved' { Write-StatePhase $state 'restore-current-save-pending' }
-            { $_ -in @('prepared', 'original-game-preserved', 'originals-preserved', 'old-copy-prepared') } {
-                if ([string]$state.phase -ceq 'prepared') {
-                    Assert-NativeIdentity $state.canonical $state.currentHashes $state.currentFingerprint 'Original game'
-                    Assert-PathAbsent $state.originalGameDirectory 'original game backup before preservation'
-                } else {
-                    Assert-PathAbsent $state.canonical 'canonical game during preparation'
-                    Assert-NativeIdentity $state.originalGameDirectory $state.currentHashes $state.currentFingerprint 'Original game'
-                }
+            'prepared' {
+                Assert-NativeIdentity $state.canonical $state.currentHashes $state.currentFingerprint 'Original game'
+                Assert-PathAbsent $state.originalGameDirectory 'original game backup before preservation'
+                Write-StatePhase $state 'restore-original-game-restored'
+            }
+            { $_ -in @('original-game-preserved', 'originals-preserved', 'old-copy-prepared') } {
+                Assert-PathAbsent $state.canonical 'canonical game during preparation'
+                Assert-NativeIdentity $state.originalGameDirectory $state.currentHashes $state.currentFingerprint 'Original game'
                 Write-StatePhase $state 'restore-no-active-game'
             }
             'restore-no-active-game' {
