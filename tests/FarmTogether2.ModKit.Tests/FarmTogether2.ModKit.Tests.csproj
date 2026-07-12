@@ -14,6 +14,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/FarmTogether2.ContractModel/FarmTogether2.ContractModel.csproj" />
+    <ProjectReference Include="../../src/Stubs/Assembly-CSharp/Assembly-CSharp.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/Stubs/Il2Cppmscorlib/Il2Cppmscorlib.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/Stubs/MilkstoneUnityExtensions/MilkstoneUnityExtensions.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/Stubs/UnityEngine.CoreModule/UnityEngine.CoreModule.csproj" ReferenceOutputAssembly="false" />

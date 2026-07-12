@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>Assembly-CSharp</AssemblyName>
+    <AssemblyVersion>0.0.0.0</AssemblyVersion>
+    <FileVersion>0.0.0.0</FileVersion>
+    <Version>0.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Il2Cppmscorlib/Il2Cppmscorlib.csproj"><Private>false</Private></ProjectReference>
+    <ProjectReference Include="../UnityEngine.CoreModule/UnityEngine.CoreModule.csproj"><Private>false</Private></ProjectReference>
+    <ProjectReference Include="../MilkstoneUnityExtensions/MilkstoneUnityExtensions.csproj"><Private>false</Private></ProjectReference>
+    <PackageReference Include="Il2CppInterop.Runtime" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
