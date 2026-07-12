@@ -1,5 +1,7 @@
 using System.IO.Compression;
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
 using NuGet.Packaging;
@@ -150,6 +152,7 @@ internal static class DeterministicNupkgWriter
 
     private static void VerifyPackage(string path, string packageId, string version)
     {
+        byte[] packageHashBeforeRead = HashFile(path);
         using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         using PackageArchiveReader reader = new(stream, leaveStreamOpen: false);
         if (reader.IsSignedAsync(CancellationToken.None).GetAwaiter().GetResult())
@@ -203,6 +206,72 @@ internal static class DeterministicNupkgWriter
         if (entryNames.Distinct(StringComparer.Ordinal).Count() != entryNames.Length ||
             entryNames.Any(IsUnsafePackagePath))
             throw new InvalidDataException("Reference package contains duplicate or unsafe paths.");
+        foreach ((string name, Version expectedVersion) in ExpectedAssemblies)
+        {
+            string entryPath = $"ref/{TargetFramework}/{name}.dll";
+            ZipArchiveEntry entry = archive.GetEntry(entryPath)
+                ?? throw new InvalidDataException($"Reference package assembly is missing: {entryPath}");
+            VerifyAssemblyEntry(entry, name, expectedVersion);
+        }
+        if (!packageHashBeforeRead.SequenceEqual(HashFile(path)))
+            throw new IOException("Reference package changed while it was read.");
+    }
+
+    private static void VerifyAssemblyEntry(ZipArchiveEntry entry, string expectedName, Version expectedVersion)
+    {
+        byte[] firstBytes = ReadEntryBytes(entry);
+        AssemblyIdentity firstIdentity = ReadAssemblyIdentity(firstBytes, entry.FullName);
+        byte[] secondBytes = ReadEntryBytes(entry);
+        AssemblyIdentity secondIdentity = ReadAssemblyIdentity(secondBytes, entry.FullName);
+        if (!firstBytes.SequenceEqual(secondBytes) || firstIdentity != secondIdentity)
+            throw new IOException($"Reference package assembly changed while it was read: {entry.FullName}");
+        if (firstIdentity.Name != expectedName || firstIdentity.Version != expectedVersion ||
+            firstIdentity.HasPublicKey || !string.IsNullOrEmpty(firstIdentity.Culture))
+        {
+            throw new InvalidDataException(
+                $"Reference package assembly identity is noncanonical: {entry.FullName}");
+        }
+    }
+
+    private static byte[] ReadEntryBytes(ZipArchiveEntry entry)
+    {
+        using Stream source = entry.Open();
+        using MemoryStream destination = new();
+        source.CopyTo(destination);
+        return destination.ToArray();
+    }
+
+    private static AssemblyIdentity ReadAssemblyIdentity(byte[] bytes, string label)
+    {
+        try
+        {
+            using MemoryStream stream = new(bytes, writable: false);
+            using PEReader peReader = new(stream);
+            if (!peReader.HasMetadata)
+                throw new BadImageFormatException("The PE image has no metadata.");
+            MetadataReader metadata = peReader.GetMetadataReader();
+            if (!metadata.IsAssembly)
+                throw new BadImageFormatException("The PE image is not an assembly.");
+            AssemblyDefinition definition = metadata.GetAssemblyDefinition();
+            string culture = definition.Culture.IsNil ? string.Empty : metadata.GetString(definition.Culture);
+            bool hasPublicKey = !definition.PublicKey.IsNil && metadata.GetBlobBytes(definition.PublicKey).Length != 0;
+            hasPublicKey |= (definition.Flags & AssemblyFlags.PublicKey) != 0;
+            return new AssemblyIdentity(
+                metadata.GetString(definition.Name),
+                definition.Version,
+                culture,
+                hasPublicKey);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
+        {
+            throw new InvalidDataException($"Reference package assembly is invalid: {label}", exception);
+        }
+    }
+
+    private static byte[] HashFile(string path)
+    {
+        using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return SHA256.HashData(stream);
     }
 
     private static bool IsUnsafePackagePath(string path) =>
@@ -257,4 +326,10 @@ internal static class DeterministicNupkgWriter
     private static byte[] Utf8(string value) => new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(value);
     private static string LowerSha256(string value) => Convert.ToHexString(SHA256.HashData(Utf8(value))).ToLowerInvariant();
     private static string UpperSha256(string value) => Convert.ToHexString(SHA256.HashData(Utf8(value)));
+
+    private readonly record struct AssemblyIdentity(
+        string Name,
+        Version Version,
+        string Culture,
+        bool HasPublicKey);
 }

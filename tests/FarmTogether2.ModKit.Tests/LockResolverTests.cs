@@ -168,7 +168,10 @@ public sealed class LockResolverTests
                 RedirectStandardError = true,
                 UseShellExecute = false
             };
-            foreach (string argument in new[] { "run", "--project", ToolProject, "-c", "Release", "--no-build", "--" }.Concat(toolArguments))
+            foreach (string argument in new[]
+                     {
+                         "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--"
+                     }.Concat(toolArguments))
                 startInfo.ArgumentList.Add(argument);
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start dotnet.");
             string stdout = process.StandardOutput.ReadToEnd();

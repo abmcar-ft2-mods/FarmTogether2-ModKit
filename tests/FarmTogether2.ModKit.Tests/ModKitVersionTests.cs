@@ -169,7 +169,14 @@ public sealed class ModKitVersionTests
                 "UnityEngine.TextRenderingModule"
             })
             {
-                string directory = Path.Combine(DirectoryPath, "src", "Stubs", assembly, "bin", "Release", "net6.0");
+                string directory = Path.Combine(
+                    DirectoryPath,
+                    "src",
+                    "Stubs",
+                    assembly,
+                    "bin",
+                    TestBuildConfiguration.Current,
+                    "net6.0");
                 Directory.CreateDirectory(directory);
                 File.WriteAllText(Path.Combine(directory, assembly + ".dll"), "fixture", new UTF8Encoding(false));
             }
@@ -205,7 +212,7 @@ public sealed class ModKitVersionTests
             [
                 "-NoLogo", "-NoProfile", "-File", Path.Combine(DirectoryPath, "scripts", "Pack-GameApiRef.ps1"),
                 "-OutputDirectory", PackageOutput,
-                "-Configuration", "Release",
+                "-Configuration", TestBuildConfiguration.Current,
                 "-NoBuild"
             ];
             if (extraArguments is not null)

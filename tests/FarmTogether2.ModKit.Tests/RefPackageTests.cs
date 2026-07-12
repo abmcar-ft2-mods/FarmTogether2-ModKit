@@ -164,6 +164,46 @@ public sealed class RefPackageTests
         fixture.VerifyPackage(package).AssertFailure();
     }
 
+    [Theory]
+    [InlineData("invalid-image")]
+    [InlineData("wrong-name")]
+    [InlineData("wrong-version")]
+    [InlineData("public-key")]
+    [InlineData("culture")]
+    public void VerifierRejectsTamperedAssemblyIdentity(string mutation)
+    {
+        using Fixture fixture = new();
+        string root = fixture.CreateAssemblyRoot("input");
+        string package = fixture.WritePackage(root, "output").AssertSuccess().PackagePath;
+        byte[] replacement;
+        if (mutation == "invalid-image")
+        {
+            replacement = "not-an-assembly"u8.ToArray();
+        }
+        else
+        {
+            string replacementPath = Path.Combine(fixture.DirectoryPath, "replacement.dll");
+            WriteAssembly(
+                replacementPath,
+                mutation == "wrong-name" ? "Wrong-Assembly" : "Assembly-CSharp",
+                mutation == "wrong-version" ? new Version(1, 0, 0, 0) : new Version(0, 0, 0, 0),
+                publicKey: mutation == "public-key" ? [1, 2, 3, 4] : null,
+                culture: mutation == "culture" ? "fr-FR" : null);
+            replacement = File.ReadAllBytes(replacementPath);
+        }
+
+        using (ZipArchive archive = ZipFile.Open(package, ZipArchiveMode.Update))
+        {
+            ZipArchiveEntry entry = archive.GetEntry("ref/net6.0/Assembly-CSharp.dll")
+                ?? throw new Xunit.Sdk.XunitException("Reference package is missing Assembly-CSharp.dll.");
+            using Stream stream = entry.Open();
+            stream.SetLength(0);
+            stream.Write(replacement);
+        }
+
+        fixture.VerifyPackage(package).AssertFailure("assembly");
+    }
+
     [Fact]
     public void WriterRejectsSymlinkAncestorWithoutTouchingItsTarget()
     {
@@ -202,9 +242,15 @@ public sealed class RefPackageTests
         .Select(name => Path.Combine(root, $"{name}.dll"))
         .ToArray();
 
-    private static void WriteAssembly(string path, string name, Version version, byte[]? publicKey = null)
+    private static void WriteAssembly(
+        string path,
+        string name,
+        Version version,
+        byte[]? publicKey = null,
+        string? culture = null)
     {
         AssemblyNameDefinition identity = new(name, version);
+        identity.Culture = culture;
         if (publicKey is not null)
         {
             identity.PublicKey = publicKey;
@@ -256,7 +302,7 @@ public sealed class RefPackageTests
             string package = Path.Combine(outputRoot, $"{PackageId}.{version}.nupkg");
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", "Release", "--no-build", "--",
+                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
                 "ref-package", "write",
                 "--output", package,
                 "--package-id", PackageId,
@@ -286,7 +332,7 @@ public sealed class RefPackageTests
         {
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", "Release", "--no-build", "--",
+                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
                 "ref-package", "verify",
                 "--package", package,
                 "--package-id", PackageId,

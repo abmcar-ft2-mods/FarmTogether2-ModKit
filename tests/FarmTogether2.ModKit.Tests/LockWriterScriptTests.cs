@@ -280,7 +280,7 @@ public sealed class LockWriterScriptTests
             Directory.CreateDirectory(assemblyRoot);
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", "Release", "--no-build", "--",
+                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
                 "ref-package", "write",
                 "--output", AssetPath,
                 "--package-id", "FarmTogether2.GameApi.Ref",

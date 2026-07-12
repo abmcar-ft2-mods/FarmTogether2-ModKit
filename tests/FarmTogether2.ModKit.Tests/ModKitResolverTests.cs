@@ -132,6 +132,69 @@ public sealed class ModKitResolverTests
     }
 
     [Fact]
+    public void MatchingPackageAndPropsWithDamagedToolingAreReplaced()
+    {
+        using Fixture fixture = new();
+        fixture.WriteMatchingCacheWithDamagedTooling();
+
+        fixture.Run(failLiveGitOnce: true).AssertSuccess();
+
+        Assert.Equal(
+            File.ReadAllBytes(fixture.AssetPath),
+            File.ReadAllBytes(Path.Combine(fixture.Packages, AssetName)));
+        Assert.False(File.Exists(Path.Combine(fixture.Tooling, "damaged.txt")));
+        Assert.True(File.Exists(Path.Combine(
+            fixture.Tooling,
+            "tools",
+            "FarmTogether2.ModKit.Tool",
+            "FarmTogether2.ModKit.Tool.csproj")));
+        fixture.AssertNoResolverTemporaries();
+    }
+
+    [Fact]
+    public void CleanupFailureReportsErrorWithoutRollingBackCommittedCache()
+    {
+        using Fixture fixture = new();
+        fixture.WritePriorCache();
+
+        fixture.Run(failurePoint: "after-cleanup-props-backup")
+            .AssertFailure("committed successfully, but cleanup failed");
+
+        Assert.Equal(
+            File.ReadAllBytes(fixture.AssetPath),
+            File.ReadAllBytes(Path.Combine(fixture.Packages, AssetName)));
+        Assert.False(File.Exists(Path.Combine(fixture.Packages, "prior.nupkg")));
+        Assert.False(File.Exists(Path.Combine(fixture.Tooling, "prior.txt")));
+        Assert.Contains(
+            "<FarmTogether2GameApiRefVersion>1.0.0</FarmTogether2GameApiRefVersion>",
+            File.ReadAllText(fixture.Props),
+            StringComparison.Ordinal);
+        fixture.AssertNoResolverTemporaries();
+    }
+
+    public static TheoryData<string> InitialDirectoryFailurePoints => new()
+    {
+        "before-create-download-root",
+        "before-create-packages-preparing",
+        "before-create-props-preparing"
+    };
+
+    [Theory]
+    [MemberData(nameof(InitialDirectoryFailurePoints))]
+    public void InitialDirectoryCreationFailureCleansOwnedPaths(string failurePoint)
+    {
+        using Fixture fixture = new();
+        Dictionary<string, string> prior = SnapshotTree(fixture.RepositoryRoot);
+        string[] downloadsBefore = SnapshotResolverDownloadDirectories();
+
+        fixture.Run(failurePoint: failurePoint).AssertFailure(failurePoint);
+
+        Assert.Equal(prior, SnapshotTree(fixture.RepositoryRoot));
+        Assert.Equal(downloadsBefore, SnapshotResolverDownloadDirectories());
+        fixture.AssertNoResolverTemporaries();
+    }
+
+    [Fact]
     public void SymlinkCacheRootIsRejectedBeforeNetworkWithoutTouchingTarget()
     {
         using Fixture fixture = new();
@@ -224,6 +287,11 @@ public sealed class ModKitResolverTests
         return snapshot;
     }
 
+    private static string[] SnapshotResolverDownloadDirectories() => Directory
+        .EnumerateDirectories(Path.GetTempPath(), "farmtogether2-modkit-resolve-*", SearchOption.TopDirectoryOnly)
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _shimDirectory;
@@ -279,6 +347,16 @@ public sealed class ModKitResolverTests
             File.WriteAllText(Props, "prior props", new UTF8Encoding(false));
         }
 
+        public void WriteMatchingCacheWithDamagedTooling()
+        {
+            Directory.CreateDirectory(Packages);
+            Directory.CreateDirectory(Tooling);
+            Directory.CreateDirectory(Path.GetDirectoryName(Props)!);
+            File.Copy(AssetPath, Path.Combine(Packages, AssetName));
+            File.WriteAllText(Path.Combine(Tooling, "damaged.txt"), "damaged tooling", new UTF8Encoding(false));
+            File.WriteAllText(Props, ExpectedPropsContent(), new UTF8Encoding(false));
+        }
+
         public void RestoreAssetAndLock()
         {
             File.WriteAllBytes(AssetPath, _assetBytes);
@@ -329,6 +407,7 @@ public sealed class ModKitResolverTests
             string fetchedHead = Commit,
             string? destination = null,
             bool useSecondRelease = false,
+            bool failLiveGitOnce = false,
             IEnumerable<string>? extraArguments = null)
         {
             ProcessStartInfo startInfo = new("pwsh")
@@ -367,6 +446,14 @@ public sealed class ModKitResolverTests
                 startInfo.Environment["FARMT2_MODKIT_RESOLVE_FAIL_AT"] = failurePoint;
             if (gitFailure is not null)
                 startInfo.Environment["FAKE_GIT_FAIL_AT"] = gitFailure;
+            if (failLiveGitOnce)
+            {
+                startInfo.Environment["FAKE_GIT_FAIL_LIVE_ONCE"] = "1";
+                startInfo.Environment["FAKE_GIT_LIVE_PATH"] = Tooling;
+                startInfo.Environment["FAKE_GIT_LIVE_FAILURE_MARKER"] = Path.Combine(
+                    DirectoryPath,
+                    "live-git-failure.marker");
+            }
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh.");
             string stdout = process.StandardOutput.ReadToEnd();
             string stderr = process.StandardError.ReadToEnd();
@@ -418,13 +505,28 @@ public sealed class ModKitResolverTests
             File.WriteAllText(_referenceJson, JsonSerializer.Serialize(reference), new UTF8Encoding(false));
         }
 
+        private string ExpectedPropsContent()
+        {
+            string escapedPackages = System.Security.SecurityElement.Escape(Packages)
+                ?? throw new InvalidOperationException("Could not XML-escape the fixture package path.");
+            return $"""
+                <Project>
+                  <PropertyGroup>
+                    <FarmTogether2GameApiRefVersion>1.0.0</FarmTogether2GameApiRefVersion>
+                    <FarmTogether2ModKitPackageSource>{escapedPackages}</FarmTogether2ModKitPackageSource>
+                  </PropertyGroup>
+                </Project>
+
+                """.Replace("\r\n", "\n", StringComparison.Ordinal);
+        }
+
         private void CreateReferencePackage()
         {
             string assemblyRoot = Path.Combine(DirectoryPath, "assemblies");
             Directory.CreateDirectory(assemblyRoot);
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", "Release", "--no-build", "--",
+                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
                 "ref-package", "write",
                 "--output", AssetPath,
                 "--package-id", "FarmTogether2.GameApi.Ref",
@@ -472,6 +574,13 @@ public sealed class ModKitResolverTests
                 $ErrorActionPreference = 'Stop'
                 Add-Content -LiteralPath $env:FAKE_GIT_LOG -Value ($args -join ' ')
                 if ($env:FAKE_GIT_FAIL_AT -and ($args -contains $env:FAKE_GIT_FAIL_AT)) { exit 71 }
+                if ($env:FAKE_GIT_FAIL_LIVE_ONCE -and $args -contains '-C') {
+                    $root = $args[[Array]::IndexOf($args, '-C') + 1]
+                    if ($root -ceq $env:FAKE_GIT_LIVE_PATH -and -not (Test-Path -LiteralPath $env:FAKE_GIT_LIVE_FAILURE_MARKER)) {
+                        [IO.File]::WriteAllText($env:FAKE_GIT_LIVE_FAILURE_MARKER, 'failed')
+                        exit 73
+                    }
+                }
                 if ($args -contains 'init') {
                     $destination = $args[-1]
                     $toolDestination = Join-Path $destination 'tools/FarmTogether2.ModKit.Tool'
