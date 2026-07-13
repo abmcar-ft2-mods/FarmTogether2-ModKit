@@ -20,13 +20,17 @@ public sealed class ModPackagerTests
     public void WriterProducesByteIdenticalAllowlistedArchives()
     {
         using Fixture first = new("first");
-        using Fixture second = new("second");
+        using Fixture second = new("second", first);
+        Dictionary<string, string> firstInputs = first.InputHashes();
+        Dictionary<string, string> secondInputs = second.InputHashes();
 
         first.Write().AssertSuccess();
         Thread.Sleep(TimeSpan.FromSeconds(1));
         second.Write().AssertSuccess();
 
-        Assert.Equal(first.AssetHashes(), second.AssetHashes());
+        string comparison = BuildDeterminismComparison(first, second, firstInputs, secondInputs);
+        Assert.True(DictionaryEqual(firstInputs, secondInputs), "Fixture inputs differ before packaging.\n" + comparison);
+        Assert.True(DictionaryEqual(first.AssetHashes(), second.AssetHashes()), "Package artifacts differ.\n" + comparison);
         AssertPackageLayout(first.Output);
         first.Verify().AssertSuccess();
     }
@@ -147,12 +151,89 @@ public sealed class ModPackagerTests
             new AssemblyNameDefinition(name, new Version(version)),
             name,
             ModuleKind.Dll);
-        assembly.Write(path, new WriterParameters { DeterministicMvid = true });
+        assembly.Write(path, new WriterParameters { DeterministicMvid = true, Timestamp = 0 });
+    }
+
+    private static bool DictionaryEqual(IReadOnlyDictionary<string, string> first, IReadOnlyDictionary<string, string> second) =>
+        first.Count == second.Count && first.All(pair => second.TryGetValue(pair.Key, out string? value) && value == pair.Value);
+
+    private static string BuildDeterminismComparison(
+        Fixture first,
+        Fixture second,
+        IReadOnlyDictionary<string, string> firstInputs,
+        IReadOnlyDictionary<string, string> secondInputs)
+    {
+        StringBuilder report = new();
+        AppendHashes(report, "inputs:first", firstInputs);
+        AppendHashes(report, "inputs:second", secondInputs);
+        Dictionary<string, string> firstFiles = first.InputFiles();
+        Dictionary<string, string> secondFiles = second.InputFiles();
+        foreach (string name in firstFiles.Keys.Order(StringComparer.Ordinal))
+        {
+            AppendRawDifference(report, "input:" + name, firstFiles[name], secondFiles[name]);
+        }
+
+        Dictionary<string, string> firstAssets = first.AssetPaths();
+        Dictionary<string, string> secondAssets = second.AssetPaths();
+        AppendHashes(report, "assets:first", first.AssetHashes());
+        AppendHashes(report, "assets:second", second.AssetHashes());
+        foreach (string name in firstAssets.Keys.Union(secondAssets.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal))
+        {
+            bool hasFirst = firstAssets.TryGetValue(name, out string? firstPath);
+            bool hasSecond = secondAssets.TryGetValue(name, out string? secondPath);
+            if (!hasFirst || !hasSecond)
+            {
+                report.AppendLine($"asset:{name}: missing first={!hasFirst} second={!hasSecond}");
+                continue;
+            }
+            AppendRawDifference(report, "asset:" + name, firstPath!, secondPath!);
+            if (Path.GetExtension(name).Equals(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendArchive(report, "archive:first:" + name, firstPath!);
+                AppendArchive(report, "archive:second:" + name, secondPath!);
+            }
+        }
+        return report.ToString();
+    }
+
+    private static void AppendHashes(StringBuilder report, string label, IReadOnlyDictionary<string, string> hashes)
+    {
+        foreach ((string name, string hash) in hashes.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            report.AppendLine($"{label}:{name}: sha256={hash}");
+    }
+
+    private static void AppendRawDifference(StringBuilder report, string label, string firstPath, string secondPath)
+    {
+        byte[] first = File.ReadAllBytes(firstPath);
+        byte[] second = File.ReadAllBytes(secondPath);
+        int limit = Math.Min(first.Length, second.Length);
+        int offset = 0;
+        while (offset < limit && first[offset] == second[offset])
+            offset++;
+        string difference = offset < limit
+            ? $"offset={offset} first=0x{first[offset]:x2} second=0x{second[offset]:x2}"
+            : offset == first.Length && offset == second.Length
+                ? "identical"
+                : $"offset={offset} first=<eof:{first.Length}> second=<eof:{second.Length}>";
+        report.AppendLine($"{label}: firstLength={first.Length} secondLength={second.Length} firstDifference={difference}");
+    }
+
+    private static void AppendArchive(StringBuilder report, string label, string path)
+    {
+        using ZipArchive archive = ZipFile.OpenRead(path);
+        foreach (ZipArchiveEntry entry in archive.Entries)
+        {
+            using Stream payload = entry.Open();
+            string hash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+            report.AppendLine(
+                $"{label}:{entry.FullName}: sha256={hash} crc32={entry.Crc32:x8} length={entry.Length} compressedLength={entry.CompressedLength} " +
+                $"lastWriteTime={entry.LastWriteTime:O} externalAttributes={entry.ExternalAttributes}");
+        }
     }
 
     private sealed class Fixture : IDisposable
     {
-        public Fixture(string? label = null)
+        public Fixture(string? label = null, Fixture? sourceInputs = null)
         {
             DirectoryPath = Path.Combine(Path.GetTempPath(), $"modkit-mod-package-{label}-{Guid.NewGuid():N}");
             Repository = Path.Combine(DirectoryPath, "repository");
@@ -160,13 +241,25 @@ public sealed class ModPackagerTests
             string projectDirectory = Path.Combine(Repository, "src", AssemblyName);
             PluginDll = Path.Combine(projectDirectory, AssemblyName + ".dll");
             PluginPdb = Path.Combine(projectDirectory, AssemblyName + ".pdb");
+            Readme = Path.Combine(Repository, "packaging", "README_安装说明.txt");
+            License = Path.Combine(Repository, "LICENSE");
             Directory.CreateDirectory(projectDirectory);
             Directory.CreateDirectory(Path.Combine(Repository, "packaging"));
             Directory.CreateDirectory(Output);
-            WriteAssembly(PluginDll, AssemblyName, Version);
-            File.WriteAllBytes(PluginPdb, [1, 2, 3, 4]);
-            File.WriteAllText(Path.Combine(Repository, "packaging", "README_安装说明.txt"), "Install\n", new UTF8Encoding(false));
-            File.WriteAllText(Path.Combine(Repository, "LICENSE"), "MIT\n", new UTF8Encoding(false));
+            if (sourceInputs is null)
+            {
+                WriteAssembly(PluginDll, AssemblyName, Version);
+                File.WriteAllBytes(PluginPdb, [1, 2, 3, 4]);
+                File.WriteAllText(Readme, "Install\n", new UTF8Encoding(false));
+                File.WriteAllText(License, "MIT\n", new UTF8Encoding(false));
+            }
+            else
+            {
+                File.Copy(sourceInputs.PluginDll, PluginDll);
+                File.Copy(sourceInputs.PluginPdb, PluginPdb);
+                File.Copy(sourceInputs.Readme, Readme);
+                File.Copy(sourceInputs.License, License);
+            }
             ModConfig = Path.Combine(Repository, "mod.json");
             File.WriteAllText(
                 ModConfig,
@@ -193,6 +286,8 @@ public sealed class ModPackagerTests
         public string ModConfig { get; }
         public string PluginDll { get; }
         public string PluginPdb { get; }
+        public string Readme { get; }
+        public string License { get; }
         public string PlayerZip => Path.Combine(Output, $"{AssemblyName}-v{Version}.zip");
         public string Checksums => Path.Combine(Output, "SHA256SUMS.txt");
 
@@ -219,6 +314,23 @@ public sealed class ModPackagerTests
                 path => Path.GetFileName(path)!,
                 path => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant(),
                 StringComparer.Ordinal);
+
+        public Dictionary<string, string> InputHashes() => InputFiles().ToDictionary(
+            pair => pair.Key,
+            pair => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(pair.Value))).ToLowerInvariant(),
+            StringComparer.Ordinal);
+
+        public Dictionary<string, string> InputFiles() => new(StringComparer.Ordinal)
+        {
+            ["pluginDll"] = PluginDll,
+            ["pluginPdb"] = PluginPdb,
+            ["readme"] = Readme,
+            ["license"] = License,
+            ["modConfig"] = ModConfig
+        };
+
+        public Dictionary<string, string> AssetPaths() => Directory.EnumerateFiles(Output)
+            .ToDictionary(path => Path.GetFileName(path)!, StringComparer.Ordinal);
 
         public void UpdatePlayerChecksum()
         {

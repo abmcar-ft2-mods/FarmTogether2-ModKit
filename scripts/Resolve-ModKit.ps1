@@ -252,7 +252,7 @@ function Invoke-GitProbe([string[]]$Arguments) {
     $previousPreference = $PSNativeCommandUseErrorActionPreference
     try {
         $PSNativeCommandUseErrorActionPreference = $false
-        $output = @(& git @Arguments 2>$null)
+        $output = @(& git --no-replace-objects @Arguments 2>$null)
         $exitCode = $LASTEXITCODE
     } finally {
         $PSNativeCommandUseErrorActionPreference = $previousPreference

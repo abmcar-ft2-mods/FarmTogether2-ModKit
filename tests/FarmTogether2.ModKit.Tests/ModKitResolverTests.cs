@@ -42,11 +42,24 @@ public sealed class ModKitResolverTests
         Assert.Contains($"fetch --no-tags --depth=1 origin {Commit}", gitLog, StringComparison.Ordinal);
         Assert.Contains($"checkout --detach {Commit}", gitLog, StringComparison.Ordinal);
         Assert.DoesNotContain("clean -ffdx", gitLog, StringComparison.Ordinal);
-        Assert.All(File.ReadAllLines(fixture.GitLog), line => Assert.StartsWith("--no-replace-objects ", line, StringComparison.Ordinal));
+        string[] expectedProbeInvocations =
+        [
+            $"--no-replace-objects -C {fixture.Tooling} rev-parse HEAD",
+            $"--no-replace-objects -C {fixture.Tooling} rev-parse --abbrev-ref HEAD",
+            $"--no-replace-objects -C {fixture.Tooling} remote get-url origin",
+            $"--no-replace-objects -C {fixture.Tooling} status --porcelain --untracked-files=all"
+        ];
+        string[] firstGitInvocations = File.ReadAllLines(fixture.GitLog);
+        Assert.Equal(expectedProbeInvocations, firstGitInvocations[^expectedProbeInvocations.Length..]);
+        Assert.All(firstGitInvocations, line => Assert.StartsWith("--no-replace-objects ", line, StringComparison.Ordinal));
         fixture.AssertNoResolverTemporaries();
 
         Dictionary<string, string> first = SnapshotTree(fixture.ModKitRoot);
         fixture.Run().AssertSuccess();
+        string[] allGitInvocations = File.ReadAllLines(fixture.GitLog);
+        string[] secondGitInvocations = allGitInvocations[firstGitInvocations.Length..];
+        Assert.Equal(expectedProbeInvocations, secondGitInvocations[^expectedProbeInvocations.Length..]);
+        Assert.All(secondGitInvocations, line => Assert.StartsWith("--no-replace-objects ", line, StringComparison.Ordinal));
         Assert.Equal(first, SnapshotTree(fixture.ModKitRoot));
         fixture.AssertNoResolverTemporaries();
     }
