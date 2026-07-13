@@ -4,7 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="Il2CppInterop.Common" Version="1.5.1-ci.829" />
-    <PackageVersion Include="Il2CppInterop.Runtime" Version="1.5.1-ci.829" />
+    <PackageVersion Include="Il2CppInterop.Runtime" Version="1.5.1-ci.845" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageVersion Include="Mono.Cecil" Version="0.11.6" />
     <PackageVersion Include="NuGet.Packaging" Version="7.6.0" />

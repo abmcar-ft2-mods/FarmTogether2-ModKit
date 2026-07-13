@@ -15,12 +15,12 @@
       },
       "Il2CppInterop.Runtime": {
         "type": "Direct",
-        "requested": "[1.5.1-ci.829, )",
-        "resolved": "1.5.1-ci.829",
-        "contentHash": "SHw30EU1u5JpdXqEtLYUKf6oyINvoPDwMEjkctpTBF5Zq+V6dANrhqNDEjljpXOiFvF8ZFx0UN4wNC/bIut7Yg==",
+        "requested": "[1.5.1-ci.845, )",
+        "resolved": "1.5.1-ci.845",
+        "contentHash": "Z2W3+S1tmF8sz0nSw80+o3BDG/4Ugyv5iw9XMDA3hrUvhGCwil19xs3NGxpFmzjxAVsCOatWDb3a/C0SuhsG7Q==",
         "dependencies": {
           "Iced": "1.17.0",
-          "Il2CppInterop.Common": "1.5.1-ci.829"
+          "Il2CppInterop.Common": "1.5.1-ci.845"
         }
       },
       "Iced": {
