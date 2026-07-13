@@ -49,6 +49,10 @@ public sealed class RepositoryAuditTests
         {
             "flow mapping",
             $"on: push\njobs: {{ call: {{ uses: owner/repository/.github/workflows/reuse.yml@{Pin}, \"secrets\": \"inherit\" }} }}\n"
+        },
+        {
+            "folded block scalar",
+            $"on: push\njobs:\n  call:\n    uses: owner/repository/.github/workflows/reuse.yml@{Pin}\n    secrets: >-\n      inherit\n"
         }
     };
 
@@ -129,6 +133,15 @@ public sealed class RepositoryAuditTests
     }
 
     [Fact]
+    public void ReplacementCommitCannotHideForbiddenOriginalHistory()
+    {
+        using Fixture fixture = new();
+        fixture.InstallCleanReplacementHidingForbiddenBlob();
+
+        fixture.Audit().AssertFailure("GameAssembly.dll");
+    }
+
+    [Fact]
     public void HistoricalLocalPathIsRejected()
     {
         using Fixture fixture = new();
@@ -189,6 +202,30 @@ public sealed class RepositoryAuditTests
         {
             Git("rm", "--", relative).AssertSuccess();
             Git("commit", "-m", message).AssertSuccess();
+        }
+
+        public void InstallCleanReplacementHidingForbiddenBlob()
+        {
+            CommitFile("GameAssembly.dll", [1, 2, 3], "forbidden original");
+            ProcessResult originalResult = Git("rev-parse", "HEAD");
+            originalResult.AssertSuccess();
+            string original = originalResult.Stdout.Trim();
+            Git("rm", "--", "GameAssembly.dll").AssertSuccess();
+            ProcessResult treeResult = Git("write-tree");
+            treeResult.AssertSuccess();
+            ProcessResult replacementResult = Git("commit-tree", treeResult.Stdout.Trim(), "-m", "safe replacement");
+            replacementResult.AssertSuccess();
+            string replacement = replacementResult.Stdout.Trim();
+            Git("reset", "--hard", original).AssertSuccess();
+            Git("replace", original, replacement).AssertSuccess();
+            Git("reset", "--hard", "HEAD").AssertSuccess();
+
+            ProcessResult head = Git("rev-parse", "HEAD");
+            head.AssertSuccess();
+            Assert.Equal(original, head.Stdout.Trim());
+            ProcessResult status = Git("status", "--porcelain", "--untracked-files=all");
+            status.AssertSuccess();
+            Assert.Empty(status.Stdout);
         }
 
         public ProcessResult Audit(bool nativeErrorPreference = false)

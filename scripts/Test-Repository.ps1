@@ -23,7 +23,7 @@ function Assert-NoReparseAncestor([string]$Path, [string]$Label) {
 }
 
 function Invoke-Git([string[]]$Arguments, [string]$Label) {
-    $output = @(& git -C $script:Root @Arguments)
+    $output = @(& git --no-replace-objects -C $script:Root @Arguments)
     if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE." }
     return $output
 }
@@ -373,7 +373,9 @@ function Test-WorkflowYaml([string]$Text, [string]$Label) {
         if ($node.Kind -cne 'Mapping') { continue }
         foreach ($entry in $node.Value) {
             if ($entry.Key -ceq 'uses' -and ($entry.Value.Kind -cne 'Scalar' -or $entry.Value.Value -cnotmatch '@[0-9a-f]{40}$')) { return $false }
-            if ($entry.Key -ceq 'secrets' -and $entry.Value.Kind -ceq 'Scalar' -and $entry.Value.Value -ceq 'inherit') { return $false }
+            if ($entry.Key -ceq 'secrets' -and (
+                $entry.Value.Kind -ceq 'BlockScalar' -or
+                ($entry.Value.Kind -ceq 'Scalar' -and $entry.Value.Value -ceq 'inherit'))) { return $false }
             $pending.Push($entry.Value)
         }
     }
@@ -400,9 +402,9 @@ $inside = @(Invoke-Git @('rev-parse','--is-inside-work-tree') 'Git repository ve
 if ($inside.Count -ne 1 -or $inside[0].Trim() -cne 'true') { throw 'RepositoryRoot is not a Git worktree.' }
 
 $script:Offenders = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-& git -C $script:Root diff --quiet --
+& git --no-replace-objects -C $script:Root diff --quiet --
 if ($LASTEXITCODE -eq 1) { Add-Offender '<dirty-tracked-worktree>' } elseif ($LASTEXITCODE -ne 0) { throw 'Tracked worktree diff failed.' }
-& git -C $script:Root diff --cached --quiet --
+& git --no-replace-objects -C $script:Root diff --cached --quiet --
 if ($LASTEXITCODE -eq 1) { Add-Offender '<dirty-tracked-index>' } elseif ($LASTEXITCODE -ne 0) { throw 'Tracked index diff failed.' }
 
 $tracked = @(Invoke-Git @('-c','core.quotepath=false','ls-files') 'Tracked path listing')

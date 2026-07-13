@@ -66,6 +66,18 @@ public sealed class InvokeModBuildTests
         Assert.False(File.Exists(fixture.DotNetLog));
     }
 
+    [Fact]
+    public void ReplacementCommitCannotSwapRunnerBeforeRawGitValidation()
+    {
+        using Fixture fixture = new();
+        fixture.InstallCleanReplacementRunnerInjection();
+
+        fixture.Run("Hosted", useRealGit: true).AssertFailure("dirty");
+
+        Assert.False(File.Exists(fixture.ReplacementMarker));
+        Assert.False(File.Exists(fixture.DotNetLog));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(" Fixture ")]
@@ -99,17 +111,20 @@ public sealed class InvokeModBuildTests
     private sealed class Fixture : IDisposable
     {
         private readonly string _shimDirectory;
+        private readonly string _realGitShimDirectory;
 
         public Fixture()
         {
             DirectoryPath = Path.Combine(Path.GetTempPath(), $"modkit-invoke-build-{Guid.NewGuid():N}");
             Repository = Path.Combine(DirectoryPath, "repository");
             _shimDirectory = Path.Combine(DirectoryPath, "shim");
+            _realGitShimDirectory = Path.Combine(DirectoryPath, "real-git-shim");
             GameDirectory = Path.Combine(DirectoryPath, "game");
             InteropDirectory = Path.Combine(GameDirectory, "BepInEx", "interop");
             DotNetLog = Path.Combine(DirectoryPath, "dotnet.log");
             GuardLog = Path.Combine(DirectoryPath, "guard.log");
             SequenceLog = Path.Combine(DirectoryPath, "sequence.log");
+            ReplacementMarker = Path.Combine(DirectoryPath, "replacement-runner-injected.txt");
             BuiltPlugin = Path.Combine(Repository, "src", "bin", "Fixture.dll");
             Directory.CreateDirectory(Path.Combine(Repository, "src"));
             Directory.CreateDirectory(Path.Combine(Repository, "tests"));
@@ -118,6 +133,7 @@ public sealed class InvokeModBuildTests
             Directory.CreateDirectory(packageDirectory);
             Directory.CreateDirectory(InteropDirectory);
             Directory.CreateDirectory(_shimDirectory);
+            Directory.CreateDirectory(_realGitShimDirectory);
             Directory.CreateDirectory(Path.GetDirectoryName(BuiltPlugin)!);
             File.WriteAllText(BuiltPlugin, "plugin\n", new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(Repository, "src", "Fixture.csproj"), "<Project />\n", new UTF8Encoding(false));
@@ -162,6 +178,7 @@ public sealed class InvokeModBuildTests
         public string DotNetLog { get; }
         public string GuardLog { get; }
         public string SequenceLog { get; }
+        public string ReplacementMarker { get; }
         public string BuiltPlugin { get; }
 
         public void ReplaceConfigValue(string oldValue, string newValue)
@@ -183,13 +200,54 @@ public sealed class InvokeModBuildTests
             Assert.True(head >= 0 && detached > head && clean > detached && tool > clean, string.Join("\n", sequence));
         }
 
+        public void InstallCleanReplacementRunnerInjection()
+        {
+            string tooling = Path.Combine(Repository, ".modkit", "tooling");
+            string runner = Path.Combine(tooling, "scripts", "Invoke-ModKitTool.ps1");
+            Directory.Delete(Path.Combine(tooling, ".git"), recursive: true);
+            Git(tooling, "init", "-b", "main").AssertSuccess();
+            Git(tooling, "config", "user.name", "fixture").AssertSuccess();
+            Git(tooling, "config", "user.email", "fixture@users.noreply.github.com").AssertSuccess();
+            Git(tooling, "add", "--", "scripts/Invoke-ModKitTool.ps1").AssertSuccess();
+            Git(tooling, "commit", "-m", "trusted runner").AssertSuccess();
+            ProcessResult trustedResult = Git(tooling, "rev-parse", "HEAD");
+            trustedResult.AssertSuccess();
+            string trusted = trustedResult.Stdout.Trim();
+
+            File.WriteAllText(
+                runner,
+                "Add-Content -LiteralPath $env:REPLACEMENT_MARKER -Value injected\n" + File.ReadAllText(runner),
+                new UTF8Encoding(false));
+            Git(tooling, "add", "--", "scripts/Invoke-ModKitTool.ps1").AssertSuccess();
+            Git(tooling, "commit", "-m", "replacement runner injection").AssertSuccess();
+            ProcessResult replacementResult = Git(tooling, "rev-parse", "HEAD");
+            replacementResult.AssertSuccess();
+            string replacement = replacementResult.Stdout.Trim();
+            Git(tooling, "checkout", "--detach", trusted).AssertSuccess();
+            Git(tooling, "replace", trusted, replacement).AssertSuccess();
+            Git(tooling, "reset", "--hard", "HEAD").AssertSuccess();
+
+            ProcessResult visibleStatus = Git(tooling, "status", "--porcelain", "--untracked-files=all");
+            visibleStatus.AssertSuccess();
+            Assert.Empty(visibleStatus.Stdout);
+            ProcessResult rawStatus = Git(tooling, "--no-replace-objects", "status", "--porcelain", "--untracked-files=all");
+            rawStatus.AssertSuccess();
+            Assert.Contains("scripts/Invoke-ModKitTool.ps1", rawStatus.Stdout, StringComparison.Ordinal);
+
+            string lockPath = Path.Combine(Repository, "modkit.lock.json");
+            string lockText = File.ReadAllText(lockPath);
+            Assert.Contains(Commit, lockText, StringComparison.Ordinal);
+            File.WriteAllText(lockPath, lockText.Replace(Commit, trusted, StringComparison.Ordinal), new UTF8Encoding(false));
+        }
+
         public ProcessResult Run(
             string mode,
             string? interopDir = null,
             string? gameDir = null,
             bool deploy = false,
             string? failWhenArgumentsContain = null,
-            string fakeHead = Commit)
+            string fakeHead = Commit,
+            bool useRealGit = false)
         {
             List<string> args =
             [
@@ -212,13 +270,15 @@ public sealed class InvokeModBuildTests
             };
             foreach (string argument in args)
                 startInfo.ArgumentList.Add(argument);
-            startInfo.Environment["PATH"] = _shimDirectory + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+            startInfo.Environment["PATH"] = (useRealGit ? _realGitShimDirectory : _shimDirectory) + Path.PathSeparator +
+                (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
             startInfo.Environment["FAKE_DOTNET_LOG"] = DotNetLog;
             startInfo.Environment["FAKE_DOTNET_FAIL_CONTAINS"] = failWhenArgumentsContain;
             startInfo.Environment["FAKE_GIT_HEAD"] = fakeHead;
             startInfo.Environment["FAKE_GUARD_LOG"] = GuardLog;
             startInfo.Environment["FAKE_PLUGIN_DLL"] = BuiltPlugin;
             startInfo.Environment["FAKE_SEQUENCE_LOG"] = SequenceLog;
+            startInfo.Environment["REPLACEMENT_MARKER"] = ReplacementMarker;
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh.");
             string stdout = process.StandardOutput.ReadToEnd();
             string stderr = process.StandardError.ReadToEnd();
@@ -245,6 +305,7 @@ public sealed class InvokeModBuildTests
                 exit 72
                 """.Replace("\r\n", "\n", StringComparison.Ordinal), new UTF8Encoding(false));
             WriteWrapper("dotnet", dotnetScript);
+            WriteWrapper("dotnet", dotnetScript, _realGitShimDirectory);
             WriteWrapper("git", gitScript);
             string runnerDirectory = Path.Combine(Repository, ".modkit", "tooling", "scripts");
             Directory.CreateDirectory(runnerDirectory);
@@ -263,18 +324,38 @@ public sealed class InvokeModBuildTests
                 """.Replace("\r\n", "\n", StringComparison.Ordinal), new UTF8Encoding(false));
         }
 
-        private void WriteWrapper(string name, string scriptPath)
+        private void WriteWrapper(string name, string scriptPath, string? directory = null)
         {
+            directory ??= _shimDirectory;
             if (OperatingSystem.IsWindows())
             {
-                File.WriteAllText(Path.Combine(_shimDirectory, name + ".cmd"), $"@pwsh -NoLogo -NoProfile -File \"{scriptPath}\" %*\r\n", new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(directory, name + ".cmd"), $"@pwsh -NoLogo -NoProfile -File \"{scriptPath}\" %*\r\n", new UTF8Encoding(false));
             }
             else
             {
-                string wrapper = Path.Combine(_shimDirectory, name);
+                string wrapper = Path.Combine(directory, name);
                 File.WriteAllText(wrapper, $"#!/bin/sh\nexec pwsh -NoLogo -NoProfile -File '{scriptPath.Replace("'", "'\\''", StringComparison.Ordinal)}' \"$@\"\n", new UTF8Encoding(false));
                 File.SetUnixFileMode(wrapper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
+        }
+
+        private static ProcessResult Git(string repository, params string[] arguments)
+        {
+            ProcessStartInfo startInfo = new("git")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add("-C");
+            startInfo.ArgumentList.Add(repository);
+            foreach (string argument in arguments)
+                startInfo.ArgumentList.Add(argument);
+            using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git.");
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            return new ProcessResult(process.ExitCode, stdout, stderr);
         }
 
         public void Dispose()

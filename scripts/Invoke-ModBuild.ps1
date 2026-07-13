@@ -181,11 +181,11 @@ if ((Get-FileHash -LiteralPath $packageEntries[0].FullName -Algorithm SHA256).Ha
     throw 'Locked ModKit package SHA-256 differs from modkit.lock.json.'
 }
 
-$head = @(& git -C $tooling rev-parse HEAD)
+$head = @(& git --no-replace-objects -C $tooling rev-parse HEAD)
 if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $lock.workflowCommit) { throw 'Locked ModKit tooling HEAD differs from modkit.lock.json.' }
-$branch = @(& git -C $tooling rev-parse --abbrev-ref HEAD)
+$branch = @(& git --no-replace-objects -C $tooling rev-parse --abbrev-ref HEAD)
 if ($LASTEXITCODE -ne 0 -or $branch.Count -ne 1 -or $branch[0].Trim() -cne 'HEAD') { throw 'Locked ModKit tooling must be detached.' }
-$status = @(& git -C $tooling status --porcelain --untracked-files=all)
+$status = @(& git --no-replace-objects -C $tooling status --porcelain --untracked-files=all)
 if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { throw 'Locked ModKit tooling checkout is dirty.' }
 
 $modConfig = Join-Path $root 'mod.json'

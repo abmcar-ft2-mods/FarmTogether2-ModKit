@@ -42,6 +42,7 @@ public sealed class ModKitResolverTests
         Assert.Contains($"fetch --no-tags --depth=1 origin {Commit}", gitLog, StringComparison.Ordinal);
         Assert.Contains($"checkout --detach {Commit}", gitLog, StringComparison.Ordinal);
         Assert.DoesNotContain("clean -ffdx", gitLog, StringComparison.Ordinal);
+        Assert.All(File.ReadAllLines(fixture.GitLog), line => Assert.StartsWith("--no-replace-objects ", line, StringComparison.Ordinal));
         fixture.AssertNoResolverTemporaries();
 
         Dictionary<string, string> first = SnapshotTree(fixture.ModKitRoot);
