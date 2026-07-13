@@ -206,6 +206,7 @@ public sealed class InvokeModBuildTests
             string runner = Path.Combine(tooling, "scripts", "Invoke-ModKitTool.ps1");
             Directory.Delete(Path.Combine(tooling, ".git"), recursive: true);
             Git(tooling, "init", "-b", "main").AssertSuccess();
+            Git(tooling, "config", "core.autocrlf", "false").AssertSuccess();
             Git(tooling, "config", "user.name", "fixture").AssertSuccess();
             Git(tooling, "config", "user.email", "fixture@users.noreply.github.com").AssertSuccess();
             Git(tooling, "add", "--", "scripts/Invoke-ModKitTool.ps1").AssertSuccess();
@@ -360,8 +361,7 @@ public sealed class InvokeModBuildTests
 
         public void Dispose()
         {
-            if (Directory.Exists(DirectoryPath))
-                Directory.Delete(DirectoryPath, recursive: true);
+            TestFileSystem.DeleteDirectoryTree(DirectoryPath);
         }
     }
 

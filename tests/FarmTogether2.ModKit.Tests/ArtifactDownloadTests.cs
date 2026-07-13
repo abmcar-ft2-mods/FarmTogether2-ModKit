@@ -592,17 +592,23 @@ public sealed class ArtifactDownloadTests
 
     private static void CreateDirectoryJunction(string linkPath, string targetPath)
     {
-        var startInfo = new ProcessStartInfo("cmd.exe")
+        var startInfo = new ProcessStartInfo("pwsh")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        startInfo.ArgumentList.Add("/d");
-        startInfo.ArgumentList.Add("/c");
-        startInfo.ArgumentList.Add($"mklink /J \"{linkPath}\" \"{targetPath}\"");
+        startInfo.ArgumentList.Add("-NoLogo");
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(
+            "$ErrorActionPreference = 'Stop'; " +
+            "$null = New-Item -ItemType Junction -Path $env:MODKIT_JUNCTION_LINK -Target $env:MODKIT_JUNCTION_TARGET");
+        startInfo.Environment["MODKIT_JUNCTION_LINK"] = linkPath;
+        startInfo.Environment["MODKIT_JUNCTION_TARGET"] = targetPath;
         using Process process = Process.Start(startInfo) ??
-            throw new InvalidOperationException("Unable to start cmd.exe for junction capability probe.");
+            throw new InvalidOperationException("Unable to start PowerShell for junction capability probe.");
         string stdout = process.StandardOutput.ReadToEnd();
         string stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
@@ -850,7 +856,6 @@ public sealed class ArtifactDownloadTests
         private readonly TcpListener _redirectListener;
         private readonly TcpListener _httpsRedirectListener;
         private readonly TcpListener _archiveListener;
-        private readonly RSA _certificateKey;
         private readonly X509Certificate2 _certificate;
         private readonly CancellationTokenSource _cancellation = new();
         private readonly Task _redirectTask;
@@ -872,18 +877,22 @@ public sealed class ArtifactDownloadTests
             RedirectUrl = $"http://127.0.0.1:{redirectPort}/redirect";
             HttpsRedirectUrl = $"https://127.0.0.1:{httpsRedirectPort}/redirect";
             ArchiveUrl = $"http://127.0.0.1:{archivePort}/archive";
-            _certificateKey = RSA.Create(2048);
+            using RSA certificateKey = RSA.Create(2048);
             var certificateRequest = new CertificateRequest(
                 "CN=127.0.0.1",
-                _certificateKey,
+                certificateKey,
                 HashAlgorithmName.SHA256,
                 RSASignaturePadding.Pkcs1);
             var subjectAlternativeName = new SubjectAlternativeNameBuilder();
             subjectAlternativeName.AddIpAddress(IPAddress.Loopback);
             certificateRequest.CertificateExtensions.Add(subjectAlternativeName.Build());
-            _certificate = certificateRequest.CreateSelfSigned(
+            using X509Certificate2 generatedCertificate = certificateRequest.CreateSelfSigned(
                 DateTimeOffset.UtcNow.AddDays(-1),
                 DateTimeOffset.UtcNow.AddDays(1));
+            _certificate = new X509Certificate2(
+                generatedCertificate.Export(X509ContentType.Pfx),
+                string.Empty,
+                X509KeyStorageFlags.UserKeySet);
             _redirectTask = Task.Run(() => ServeAsync(_redirectListener, isRedirect: true, useTls: false));
             _httpsRedirectTask = Task.Run(() => ServeAsync(_httpsRedirectListener, isRedirect: true, useTls: true));
             _archiveTask = Task.Run(() => ServeAsync(_archiveListener, isRedirect: false, useTls: false));
@@ -1009,20 +1018,31 @@ public sealed class ArtifactDownloadTests
 
         public void Dispose()
         {
-            _cancellation.Cancel();
-            _redirectListener.Stop();
-            _httpsRedirectListener.Stop();
-            _archiveListener.Stop();
             try
             {
-                Task.WhenAll(_redirectTask, _httpsRedirectTask, _archiveTask).GetAwaiter().GetResult();
+                _cancellation.Cancel();
+                _redirectListener.Stop();
+                _httpsRedirectListener.Stop();
+                _archiveListener.Stop();
+                try
+                {
+                    Task.WhenAll(_redirectTask, _httpsRedirectTask, _archiveTask).GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                }
             }
-            catch (OperationCanceledException)
+            finally
             {
+                try
+                {
+                    _certificate.Dispose();
+                }
+                finally
+                {
+                    _cancellation.Dispose();
+                }
             }
-            _certificate.Dispose();
-            _certificateKey.Dispose();
-            _cancellation.Dispose();
         }
     }
 }

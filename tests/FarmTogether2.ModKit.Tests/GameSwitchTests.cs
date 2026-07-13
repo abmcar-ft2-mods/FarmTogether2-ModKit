@@ -1057,7 +1057,17 @@ public sealed class GameSwitchTests
             }
 
             string driver = Path.Combine(DirectoryPath, $"switch-driver-{Guid.NewGuid():N}.ps1");
-            File.WriteAllText(driver, invocation.ToString());
+            var driverBody = new StringBuilder();
+            driverBody.AppendLine("try {");
+            driverBody.Append("    ").AppendLine(invocation.ToString());
+            driverBody.AppendLine("} catch {");
+            driverBody.AppendLine("    [Console]::Error.WriteLine($_.Exception.Message)");
+            driverBody.AppendLine("    exit 1");
+            driverBody.AppendLine("}");
+            File.WriteAllText(
+                driver,
+                driverBody.ToString().Replace("\r\n", "\n", StringComparison.Ordinal),
+                new UTF8Encoding(false));
             return RunPowerShell(new[] { "-File", driver }, "FARMT2_SWITCH_FAIL_AT", crashPoint);
         }
 

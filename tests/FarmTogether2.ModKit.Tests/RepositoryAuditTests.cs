@@ -179,6 +179,7 @@ public sealed class RepositoryAuditTests
             Repository = Path.Combine(DirectoryPath, "repository");
             Directory.CreateDirectory(Repository);
             Git("init", "-b", "main").AssertSuccess();
+            Git("config", "core.autocrlf", "false").AssertSuccess();
             Git("config", "user.name", "abmcar").AssertSuccess();
             Git("config", "user.email", "52450271+abmcar@users.noreply.github.com").AssertSuccess();
             CommitFile("README.md", Encoding.UTF8.GetBytes("safe\n"), "initial");
@@ -258,8 +259,7 @@ public sealed class RepositoryAuditTests
 
         public void Dispose()
         {
-            if (Directory.Exists(DirectoryPath))
-                Directory.Delete(DirectoryPath, recursive: true);
+            TestFileSystem.DeleteDirectoryTree(DirectoryPath);
         }
     }
 

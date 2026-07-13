@@ -163,6 +163,7 @@ public sealed class ToolRunnerTests
                 }
                 """.Replace("\r\n", "\n", StringComparison.Ordinal) + "\n", new UTF8Encoding(false));
             Git("init", "-b", "main").AssertSuccess();
+            Git("config", "core.autocrlf", "false").AssertSuccess();
             Git("config", "user.name", "fixture").AssertSuccess();
             Git("config", "user.email", "fixture@users.noreply.github.com").AssertSuccess();
             Git("add", "--", ".").AssertSuccess();
@@ -271,8 +272,7 @@ public sealed class ToolRunnerTests
 
         public void Dispose()
         {
-            if (Directory.Exists(DirectoryPath))
-                Directory.Delete(DirectoryPath, recursive: true);
+            TestFileSystem.DeleteDirectoryTree(DirectoryPath);
         }
     }
 
