@@ -248,6 +248,21 @@ function Invoke-Git([string[]]$Arguments, [string]$Label) {
     return $output
 }
 
+function Invoke-GitProbe([string[]]$Arguments) {
+    $previousPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = @(& git @Arguments 2>$null)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previousPreference
+    }
+    return [pscustomobject]@{
+        Succeeded = $exitCode -eq 0
+        Output = [string[]]$output
+    }
+}
+
 function Invoke-ResolvePoint([string]$Name) {
     if ($env:FARMT2_MODKIT_RESOLVE_FAIL_AT -ceq $Name) {
         throw "Injected ModKit resolver failure at $Name."
@@ -311,14 +326,17 @@ function Test-LiveCacheMatch(
         (Get-FileHash -LiteralPath $packageEntries[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$Lock.sha256) {
         return $false
     }
-    $head = @(Invoke-Git @('-C',$Tooling,'rev-parse','HEAD') 'Live tooling HEAD verification')
-    $branch = @(Invoke-Git @('-C',$Tooling,'rev-parse','--abbrev-ref','HEAD') 'Live tooling detached-state verification')
-    $remote = @(Invoke-Git @('-C',$Tooling,'remote','get-url','origin') 'Live tooling remote verification')
-    $status = @(Invoke-Git @('-C',$Tooling,'status','--porcelain','--untracked-files=all') 'Live tooling status verification')
-    return $head.Count -eq 1 -and $head[0].Trim() -ceq [string]$Lock.workflowCommit -and
-        $branch.Count -eq 1 -and $branch[0].Trim() -ceq 'HEAD' -and
-        $remote.Count -eq 1 -and $remote[0].Trim() -ceq $RemoteUrl -and
-        $status.Count -eq 0 -and [IO.File]::ReadAllText($Props) -ceq $PropsContent
+    $head = Invoke-GitProbe @('-C',$Tooling,'rev-parse','HEAD')
+    $branch = Invoke-GitProbe @('-C',$Tooling,'rev-parse','--abbrev-ref','HEAD')
+    $remote = Invoke-GitProbe @('-C',$Tooling,'remote','get-url','origin')
+    $status = Invoke-GitProbe @('-C',$Tooling,'status','--porcelain','--untracked-files=all')
+    if (-not $head.Succeeded -or -not $branch.Succeeded -or -not $remote.Succeeded -or -not $status.Succeeded) {
+        return $false
+    }
+    return $head.Output.Count -eq 1 -and $head.Output[0].Trim() -ceq [string]$Lock.workflowCommit -and
+        $branch.Output.Count -eq 1 -and $branch.Output[0].Trim() -ceq 'HEAD' -and
+        $remote.Output.Count -eq 1 -and $remote.Output[0].Trim() -ceq $RemoteUrl -and
+        $status.Output.Count -eq 0 -and [IO.File]::ReadAllText($Props) -ceq $PropsContent
 }
 
 $lockPath = Get-NormalizedPath $LockFile
@@ -364,13 +382,18 @@ foreach ($path in @($downloadRoot,$stagingRoot,$packagesBackup,$toolingBackup,$p
         throw "Resolver-owned attempt path already exists: $path"
     }
 }
-Assert-NoReparseAncestor ([IO.Path]::GetDirectoryName($downloadRoot)) 'Download temporary parent'
-[IO.Directory]::CreateDirectory($downloadRoot) | Out-Null
-[IO.Directory]::CreateDirectory($packagesPreparing) | Out-Null
-[IO.Directory]::CreateDirectory((Split-Path -Parent $propsPreparing)) | Out-Null
 $downloadRemoved = $false
 $stagingRemoved = $false
+$transactionComplete = $false
 try {
+    Assert-NoReparseAncestor ([IO.Path]::GetDirectoryName($downloadRoot)) 'Download temporary parent'
+    Invoke-ResolvePoint 'before-create-download-root'
+    [IO.Directory]::CreateDirectory($downloadRoot) | Out-Null
+    Invoke-ResolvePoint 'before-create-packages-preparing'
+    [IO.Directory]::CreateDirectory($packagesPreparing) | Out-Null
+    Invoke-ResolvePoint 'before-create-props-preparing'
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $propsPreparing)) | Out-Null
+
     & gh release download $lock.releaseTag -R $lock.repository `
         --pattern $lock.assetName `
         --dir $downloadRoot
@@ -524,7 +547,6 @@ try {
     $packagesPromoted = $false
     $toolingPromoted = $false
     $propsPromoted = $false
-    $transactionComplete = $false
     try {
         if (Test-Path -LiteralPath $packages -PathType Container) {
             [IO.Directory]::Move($packages, $packagesBackup)
@@ -555,12 +577,27 @@ try {
         if (-not (Test-LiveCacheMatch $packages $tooling $props $lock $propsContent $remoteUrl)) {
             throw 'Live ModKit cache does not match the locked package, tooling, and props after promotion.'
         }
-        Invoke-OwnedPathCleanup $stagingRoot
-        $stagingRemoved = $true
-        foreach ($backup in @($propsBackup,$toolingBackup,$packagesBackup)) {
-            Invoke-OwnedPathCleanup $backup
-        }
         $transactionComplete = $true
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
+        foreach ($cleanup in @(
+            [pscustomobject]@{ Path = $stagingRoot; Label = 'staging tree'; FailurePoint = 'after-cleanup-staging'; IsStaging = $true },
+            [pscustomobject]@{ Path = $propsBackup; Label = 'props backup'; FailurePoint = 'after-cleanup-props-backup'; IsStaging = $false },
+            [pscustomobject]@{ Path = $toolingBackup; Label = 'tooling backup'; FailurePoint = 'after-cleanup-tooling-backup'; IsStaging = $false },
+            [pscustomobject]@{ Path = $packagesBackup; Label = 'package backup'; FailurePoint = 'after-cleanup-packages-backup'; IsStaging = $false }
+        )) {
+            try {
+                Invoke-OwnedPathCleanup $cleanup.Path
+                if ($cleanup.IsStaging) {
+                    $stagingRemoved = $true
+                }
+                Invoke-ResolvePoint $cleanup.FailurePoint
+            } catch {
+                $cleanupErrors.Add("$($cleanup.Label): $($_.Exception.Message)")
+            }
+        }
+        if ($cleanupErrors.Count -ne 0) {
+            throw "ModKit cache committed successfully, but cleanup failed: $($cleanupErrors -join '; ')"
+        }
     } finally {
         if (-not $transactionComplete) {
             if ($propsPromoted -and (Test-Path -LiteralPath $props -PathType Leaf)) { [IO.File]::Delete($props) }
@@ -589,7 +626,7 @@ try {
     if (-not $downloadRemoved -and (Test-Path -LiteralPath $downloadRoot)) {
         Invoke-OwnedPathCleanup $downloadRoot
     }
-    if (-not $stagingRemoved -and (Test-Path -LiteralPath $stagingRoot)) {
+    if (-not $transactionComplete -and -not $stagingRemoved -and (Test-Path -LiteralPath $stagingRoot)) {
         Invoke-OwnedPathCleanup $stagingRoot
     }
 }
