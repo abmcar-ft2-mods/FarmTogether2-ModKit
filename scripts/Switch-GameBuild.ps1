@@ -15,6 +15,7 @@ param(
     [string]$OldManifestId,
     [string]$CurrentBuildId,
     [string]$CurrentManifestId,
+    [string[]]$ExpectedOldNativeHash,
     [string[]]$ExpectedCurrentNativeHash,
 
     [scriptblock]$OperationHook
@@ -23,6 +24,33 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:PathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+
+$script:LegacyStateFields = @(
+    'schemaVersion',
+    'attemptId',
+    'phase',
+    'canonical',
+    'saveDirectory',
+    'appManifestPath',
+    'downloadedOldDepot',
+    'originalGameDirectory',
+    'oldSmokeGameDirectory',
+    'currentSmokeGameDirectory',
+    'originalSaveDirectory',
+    'oldSmokeSaveDirectory',
+    'currentSmokeSaveDirectory',
+    'saveWasPresent',
+    'originalSaveFingerprint',
+    'appManifestSha256',
+    'oldBuildId',
+    'currentBuildId',
+    'oldManifestId',
+    'currentManifestId',
+    'oldHashes',
+    'currentHashes',
+    'oldFingerprint',
+    'currentFingerprint'
+)
 
 $script:StateFields = @(
     'schemaVersion',
@@ -40,7 +68,9 @@ $script:StateFields = @(
     'currentSmokeSaveDirectory',
     'saveWasPresent',
     'originalSaveFingerprint',
-    'appManifestSha256',
+    'appManifestAppId',
+    'appManifestNormalizedSha256',
+    'currentDepotManifests',
     'oldBuildId',
     'currentBuildId',
     'oldManifestId',
@@ -87,8 +117,16 @@ $script:LoaderAllowlist = @(
     [pscustomobject]@{ Path = 'doorstop_config.ini'; Required = $true },
     [pscustomobject]@{ Path = '.doorstop_version'; Required = $false },
     [pscustomobject]@{ Path = 'winhttp.dll'; Required = $true },
+    [pscustomobject]@{ Path = 'dotnet'; Required = $true },
     [pscustomobject]@{ Path = 'BepInEx/core'; Required = $true },
+    [pscustomobject]@{ Path = 'BepInEx/unity-libs'; Required = $false },
     [pscustomobject]@{ Path = 'BepInEx/config/BepInEx.cfg'; Required = $false }
+)
+
+$script:RequiredLoaderFiles = @(
+    'dotnet/coreclr.dll',
+    'dotnet/System.Private.CoreLib.dll',
+    'BepInEx/core/BepInEx.Unity.IL2CPP.dll'
 )
 
 function Invoke-OperationPoint {
@@ -177,6 +215,42 @@ function Assert-NoExistingAncestorLink {
     }
 }
 
+function Assert-RequiredLoaderFileSet {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    foreach ($relativePath in $script:RequiredLoaderFiles) {
+        $path = Join-Path $Root $relativePath
+        Assert-NoExistingAncestorLink -Path $path -Label "$Label required loader file"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "$Label required loader file is missing: $path"
+        }
+        $item = Get-Item -LiteralPath $path -Force
+        if ($item.LinkType -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "$Label required loader file must not be a symlink or reparse point: $path"
+        }
+    }
+}
+
+function Assert-DirectoryTreeHasNoLinks {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    Assert-ExistingDirectoryRootIsNotLink -Path $Path -Label $Label
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force -Recurse)) {
+        if ($item.LinkType -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "$Label must not contain symlinks or reparse points: $($item.FullName)"
+        }
+    }
+}
+
 function Assert-InputPathTopology {
     param(
         [Parameter(Mandatory)][string]$Canonical,
@@ -224,6 +298,280 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-KeyValuesTokenList {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $tokens = [Collections.Generic.List[object]]::new()
+    $position = 0
+    while ($position -lt $Text.Length) {
+        $character = $Text[$position]
+        if ([char]::IsWhiteSpace($character) -or $character -eq [char]0xfeff) {
+            $position++
+            continue
+        }
+        if ($character -eq '/' -and $position + 1 -lt $Text.Length -and $Text[$position + 1] -eq '/') {
+            $position += 2
+            while ($position -lt $Text.Length -and $Text[$position] -notin @("`r", "`n")) {
+                $position++
+            }
+            continue
+        }
+        if ($character -eq '{') {
+            [void]$tokens.Add([pscustomobject]@{ Kind = 'OpenBrace'; Value = $null })
+            $position++
+            continue
+        }
+        if ($character -eq '}') {
+            [void]$tokens.Add([pscustomobject]@{ Kind = 'CloseBrace'; Value = $null })
+            $position++
+            continue
+        }
+        if ($character -ne '"') {
+            throw "Appmanifest KeyValues syntax has an unexpected character at offset $position."
+        }
+
+        $position++
+        $rawValueStart = $position
+        $value = [Text.StringBuilder]::new()
+        $terminated = $false
+        while ($position -lt $Text.Length) {
+            $character = $Text[$position]
+            if ($character -eq '"') {
+                $rawValueLength = $position - $rawValueStart
+                $position++
+                $terminated = $true
+                break
+            }
+            if ($character -in @("`r", "`n")) {
+                throw "Appmanifest KeyValues string contains an unescaped line break at offset $position."
+            }
+            if ($character -eq '\' -and $position + 1 -lt $Text.Length) {
+                $escaped = $Text[$position + 1]
+                switch ($escaped) {
+                    '"' { [void]$value.Append('"'); $position += 2; continue }
+                    '\' { [void]$value.Append('\'); $position += 2; continue }
+                    'n' { [void]$value.Append("`n"); $position += 2; continue }
+                    'r' { [void]$value.Append("`r"); $position += 2; continue }
+                    't' { [void]$value.Append("`t"); $position += 2; continue }
+                }
+            }
+            [void]$value.Append($character)
+            $position++
+        }
+        if (-not $terminated) {
+            throw 'Appmanifest KeyValues string is not terminated.'
+        }
+        [void]$tokens.Add([pscustomobject]@{
+            Kind = 'String'
+            Value = $value.ToString()
+            RawValueStart = $rawValueStart
+            RawValueLength = $rawValueLength
+        })
+    }
+    return @($tokens)
+}
+
+function Read-KeyValuesMap {
+    param(
+        [Parameter(Mandatory)][object[]]$Tokens,
+        [Parameter(Mandatory)][ref]$Position,
+        [switch]$RequireClosingBrace
+    )
+
+    $map = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    while ($Position.Value -lt $Tokens.Count) {
+        $token = $Tokens[$Position.Value]
+        if ([string]$token.Kind -ceq 'CloseBrace') {
+            if (-not $RequireClosingBrace) {
+                throw 'Appmanifest KeyValues syntax has an unmatched closing brace.'
+            }
+            $Position.Value++
+            return ,$map
+        }
+        if ([string]$token.Kind -cne 'String') {
+            throw "Appmanifest KeyValues syntax expected a quoted key at token $($Position.Value)."
+        }
+        $key = [string]$token.Value
+        if ($map.ContainsKey($key)) {
+            throw "Appmanifest KeyValues contains a duplicate key: $key"
+        }
+        $Position.Value++
+        if ($Position.Value -ge $Tokens.Count) {
+            throw "Appmanifest KeyValues key has no value: $key"
+        }
+
+        $valueToken = $Tokens[$Position.Value]
+        if ([string]$valueToken.Kind -ceq 'String') {
+            $map.Add($key, $valueToken)
+            $Position.Value++
+            continue
+        }
+        if ([string]$valueToken.Kind -ceq 'OpenBrace') {
+            $Position.Value++
+            $value = Read-KeyValuesMap -Tokens $Tokens -Position $Position -RequireClosingBrace
+            $map.Add($key, $value)
+            continue
+        }
+        throw "Appmanifest KeyValues key has an invalid value: $key"
+    }
+    if ($RequireClosingBrace) {
+        throw 'Appmanifest KeyValues object is missing a closing brace.'
+    }
+    return ,$map
+}
+
+function Get-RequiredKeyValuesEntry {
+    param(
+        [Parameter(Mandatory)][Collections.Generic.Dictionary[string, object]]$Map,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Context
+    )
+
+    foreach ($entry in $Map.GetEnumerator()) {
+        if ([string]::Equals([string]$entry.Key, $Key, [StringComparison]::OrdinalIgnoreCase)) {
+            if (-not [string]::Equals([string]$entry.Key, $Key, [StringComparison]::Ordinal)) {
+                throw "Appmanifest $Context key has incorrect casing: expected $Key, found $($entry.Key)."
+            }
+            return ,$entry.Value
+        }
+    }
+    throw "Appmanifest $Context is missing required key $Key."
+}
+
+function Get-RequiredKeyValuesStringToken {
+    param(
+        [Parameter(Mandatory)][Collections.Generic.Dictionary[string, object]]$Map,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Context
+    )
+
+    $entry = Get-RequiredKeyValuesEntry $Map $Key $Context
+    if ($entry -isnot [System.Management.Automation.PSCustomObject] -or [string]$entry.Kind -cne 'String') {
+        throw "Appmanifest $Context must contain a string value named $Key."
+    }
+    return $entry
+}
+
+function Get-RequiredKeyValuesMap {
+    param(
+        [Parameter(Mandatory)][Collections.Generic.Dictionary[string, object]]$Map,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Context
+    )
+
+    $entry = Get-RequiredKeyValuesEntry $Map $Key $Context
+    if ($entry -isnot [Collections.Generic.Dictionary[string, object]]) {
+        throw "Appmanifest $Context must contain an object named $Key."
+    }
+    return ,$entry
+}
+
+function Get-AppManifestPathAppId {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $match = [Text.RegularExpressions.Regex]::Match(
+        [IO.Path]::GetFileName($Path),
+        '^appmanifest_([0-9]+)\.acf$',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    if (-not $match.Success) {
+        throw "Appmanifest filename must identify its appid as appmanifest_<appid>.acf: $Path"
+    }
+    return $match.Groups[1].Value
+}
+
+function Get-AppManifestEvidence {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Appmanifest is missing: $Path"
+    }
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+    } catch {
+        throw "Appmanifest cannot be read: $Path. $($_.Exception.Message)"
+    }
+    $bytePreservingText = [Text.Encoding]::Latin1.GetString($bytes)
+    $tokens = @(Get-KeyValuesTokenList $bytePreservingText)
+    $position = 0
+    $root = Read-KeyValuesMap -Tokens $tokens -Position ([ref]$position)
+    if ($position -ne $tokens.Count) {
+        throw 'Appmanifest KeyValues syntax contains trailing tokens.'
+    }
+    if ($root.Count -ne 1) {
+        throw 'Appmanifest must contain exactly one AppState root object.'
+    }
+    $appState = Get-RequiredKeyValuesMap $root 'AppState' 'root'
+    $appIdToken = Get-RequiredKeyValuesStringToken $appState 'appid' 'AppState'
+    $buildIdToken = Get-RequiredKeyValuesStringToken $appState 'buildid' 'AppState'
+    $lastPlayedToken = Get-RequiredKeyValuesStringToken $appState 'LastPlayed' 'AppState'
+    $appId = [string]$appIdToken.Value
+    $buildId = [string]$buildIdToken.Value
+    $lastPlayed = [string]$lastPlayedToken.Value
+    if ($appId -cnotmatch '^[0-9]+$' -or $buildId -cnotmatch '^[0-9]+$' -or $lastPlayed -cnotmatch '^[0-9]+$') {
+        throw 'Appmanifest appid, buildid, and LastPlayed must contain decimal digits only.'
+    }
+    $rawLastPlayed = $bytePreservingText.Substring([int]$lastPlayedToken.RawValueStart, [int]$lastPlayedToken.RawValueLength)
+    if (-not [string]::Equals($rawLastPlayed, $lastPlayed, [StringComparison]::Ordinal)) {
+        throw 'Appmanifest LastPlayed must be an unescaped decimal string.'
+    }
+
+    $installedDepots = Get-RequiredKeyValuesMap $appState 'InstalledDepots' 'AppState'
+    if ($installedDepots.Count -eq 0) {
+        throw 'Appmanifest InstalledDepots must not be empty.'
+    }
+    $depotManifests = [Collections.Generic.SortedDictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $installedDepots.GetEnumerator()) {
+        $depotId = [string]$entry.Key
+        if ($depotId -cnotmatch '^[0-9]+$' -or $entry.Value -isnot [Collections.Generic.Dictionary[string, object]]) {
+            throw "Appmanifest InstalledDepots entry is invalid: $depotId"
+        }
+        $manifestToken = Get-RequiredKeyValuesStringToken $entry.Value 'manifest' "InstalledDepots[$depotId]"
+        $manifestId = [string]$manifestToken.Value
+        if ($manifestId -cnotmatch '^[0-9]+$') {
+            throw "Appmanifest InstalledDepots[$depotId] manifest must contain decimal digits only."
+        }
+        $depotManifests.Add($depotId, $manifestId)
+    }
+    $normalizedText = $bytePreservingText.Substring(0, [int]$lastPlayedToken.RawValueStart) + '0' +
+        $bytePreservingText.Substring([int]$lastPlayedToken.RawValueStart + [int]$lastPlayedToken.RawValueLength)
+    $normalizedBytes = [Text.Encoding]::Latin1.GetBytes($normalizedText)
+    return [pscustomobject]@{
+        AppId = $appId
+        BuildId = $buildId
+        DepotManifests = $depotManifests
+        RawSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        NormalizedSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($normalizedBytes)).ToLowerInvariant()
+    }
+}
+
+function Assert-AppManifestCoreIdentity {
+    param(
+        [Parameter(Mandatory)]$Identity,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedAppId,
+        [Parameter(Mandatory)][string]$ExpectedBuildId,
+        [Parameter(Mandatory)][string]$ExpectedManifestId
+    )
+
+    $pathAppId = Get-AppManifestPathAppId $Path
+    if (-not [string]::Equals($pathAppId, $ExpectedAppId, [StringComparison]::Ordinal)) {
+        throw "Appmanifest path appid mismatch: expected $ExpectedAppId, found $pathAppId."
+    }
+    if (-not [string]::Equals([string]$Identity.AppId, $ExpectedAppId, [StringComparison]::Ordinal)) {
+        throw "Appmanifest appid mismatch: expected $ExpectedAppId, found $($Identity.AppId)."
+    }
+    if (-not [string]::Equals([string]$Identity.BuildId, $ExpectedBuildId, [StringComparison]::Ordinal)) {
+        throw "Appmanifest buildid mismatch: expected $ExpectedBuildId, found $($Identity.BuildId)."
+    }
+    $matchingDepots = @(Get-MapEntries $Identity.DepotManifests | Where-Object {
+        [string]::Equals($_.Value, $ExpectedManifestId, [StringComparison]::Ordinal)
+    })
+    if ($matchingDepots.Count -ne 1) {
+        throw "Appmanifest InstalledDepots must contain current manifest $ExpectedManifestId exactly once; found $($matchingDepots.Count)."
+    }
+}
+
 function Get-MapEntries {
     param([Parameter(Mandatory)]$Map)
 
@@ -260,7 +608,10 @@ function Get-MapValueOrdinal {
 }
 
 function ConvertTo-CanonicalNativePath {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Label = 'Native hash map'
+    )
 
     $normalized = $Path.Replace('\', '/')
     if (
@@ -270,36 +621,39 @@ function ConvertTo-CanonicalNativePath {
         $normalized -match '^[A-Za-z]:' -or
         $normalized.Contains('//', [StringComparison]::Ordinal)
     ) {
-        throw "ExpectedCurrentNativeHash contains a non-canonical path: $Path"
+        throw "$Label contains a non-canonical path: $Path"
     }
     foreach ($segment in $normalized.Split('/')) {
         if ($segment.Length -eq 0 -or $segment -eq '.' -or $segment -eq '..') {
-            throw "ExpectedCurrentNativeHash contains a non-canonical path: $Path"
+            throw "$Label contains a non-canonical path: $Path"
         }
     }
     return $normalized
 }
 
 function ConvertTo-ExpectedHashMap {
-    param([Parameter(Mandatory)][string[]]$Entries)
+    param(
+        [Parameter(Mandatory)][string[]]$Entries,
+        [Parameter(Mandatory)][string]$Label
+    )
 
     if ($Entries.Count -eq 0) {
-        throw 'ExpectedCurrentNativeHash must contain at least one path=lowercase-sha256 entry.'
+        throw "$Label must contain at least one path=lowercase-sha256 entry."
     }
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $parsed = [Collections.Generic.List[object]]::new()
     foreach ($entry in $Entries) {
         $separator = $entry.IndexOf('=')
         if ($separator -le 0 -or $separator -eq $entry.Length - 1) {
-            throw "ExpectedCurrentNativeHash entry must be relative-path=lowercase-sha256: $entry"
+            throw "$Label entry must be relative-path=lowercase-sha256: $entry"
         }
-        $relative = ConvertTo-CanonicalNativePath $entry.Substring(0, $separator)
+        $relative = ConvertTo-CanonicalNativePath $entry.Substring(0, $separator) $Label
         $hash = $entry.Substring($separator + 1)
         if ($hash -cnotmatch '^[0-9a-f]{64}$') {
-            throw "ExpectedCurrentNativeHash must use lowercase 64-hex SHA-256: $entry"
+            throw "$Label must use lowercase 64-hex SHA-256: $entry"
         }
         if (-not $seen.Add($relative)) {
-            throw "ExpectedCurrentNativeHash contains a duplicate normalized path: $relative"
+            throw "$Label contains a duplicate normalized path: $relative"
         }
         $parsed.Add([pscustomobject]@{ Path = $relative; Hash = $hash })
     }
@@ -421,45 +775,116 @@ function Assert-SaveIdentity {
     }
 }
 
-function Assert-ClosedState {
-    param([Parameter(Mandatory)]$State)
-
+function Assert-ExactStateFieldSet {
+    param(
+        [Parameter(Mandatory)]$State,
+        [Parameter(Mandatory)][string[]]$ExpectedFields
+    )
     $actualFields = if ($State -is [System.Collections.IDictionary]) {
         @($State.Keys | ForEach-Object { [string]$_ })
     } else {
         @($State.PSObject.Properties.Name)
     }
-    if ($actualFields.Count -ne $script:StateFields.Count) {
+    if ($actualFields.Count -ne $ExpectedFields.Count) {
         throw 'Game-switch state schema has missing or extra fields.'
     }
-    foreach ($field in $script:StateFields) {
+    foreach ($field in $ExpectedFields) {
         if (-not ($actualFields -ccontains $field)) {
             throw "Game-switch state schema is missing or has an incorrectly cased field: $field"
         }
     }
-    if ($State.schemaVersion -ne 1) {
-        throw "Unsupported game-switch state schema: $($State.schemaVersion)"
+}
+
+function Assert-StringStateFieldSet {
+    param(
+        [Parameter(Mandatory)]$State,
+        [Parameter(Mandatory)][string[]]$Fields
+    )
+
+    foreach ($field in $Fields) {
+        if ($State.$field -isnot [string]) {
+            throw "Game-switch state $field must be a JSON string."
+        }
     }
-    if ([string]$State.attemptId -cnotmatch '^[0-9a-f]{32}$') {
+}
+
+function Assert-StringMap {
+    param(
+        [Parameter(Mandatory)]$Map,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if ($Map -is [System.Collections.IDictionary]) {
+        foreach ($entry in $Map.GetEnumerator()) {
+            if ($entry.Key -isnot [string] -or $entry.Value -isnot [string]) {
+                throw "$Label keys and values must be JSON strings."
+            }
+        }
+        return
+    }
+    if ($Map -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Map.PSObject.Properties) {
+            if ($property.Value -isnot [string]) {
+                throw "$Label keys and values must be JSON strings."
+            }
+        }
+        return
+    }
+    throw "$Label must be a JSON object with string values."
+}
+
+function Assert-StateCommon {
+    param([Parameter(Mandatory)]$State)
+
+    Assert-StringStateFieldSet $State @(
+        'attemptId',
+        'phase',
+        'oldBuildId',
+        'currentBuildId',
+        'oldManifestId',
+        'currentManifestId',
+        'oldFingerprint',
+        'currentFingerprint',
+        'canonical',
+        'saveDirectory',
+        'appManifestPath',
+        'downloadedOldDepot',
+        'originalGameDirectory',
+        'oldSmokeGameDirectory',
+        'currentSmokeGameDirectory',
+        'originalSaveDirectory',
+        'oldSmokeSaveDirectory',
+        'currentSmokeSaveDirectory'
+    )
+    if ($State.saveWasPresent -isnot [bool]) {
+        throw 'Game-switch state saveWasPresent must be a JSON boolean.'
+    }
+    if ($null -ne $State.originalSaveFingerprint -and $State.originalSaveFingerprint -isnot [string]) {
+        throw 'Game-switch state originalSaveFingerprint must be null or a JSON string.'
+    }
+    Assert-StringMap $State.oldHashes 'Game-switch state oldHashes'
+    Assert-StringMap $State.currentHashes 'Game-switch state currentHashes'
+
+    if ($State.attemptId -cnotmatch '^[0-9a-f]{32}$') {
         throw 'Game-switch state attemptId is invalid.'
     }
-    if (-not ($script:KnownPhases -ccontains [string]$State.phase)) {
+    if (-not ($script:KnownPhases -ccontains $State.phase)) {
         throw "Game-switch state phase is invalid: $($State.phase)"
     }
     foreach ($field in 'oldBuildId', 'currentBuildId', 'oldManifestId', 'currentManifestId') {
-        if ([string]$State.$field -cnotmatch '^[0-9]+$') {
+        if ($State.$field -cnotmatch '^[0-9]+$') {
             throw "Game-switch state $field is invalid."
         }
     }
-    foreach ($field in 'appManifestSha256', 'oldFingerprint', 'currentFingerprint') {
-        if ([string]$State.$field -cnotmatch '^[0-9a-f]{64}$') {
+    foreach ($field in 'oldFingerprint', 'currentFingerprint') {
+        if ($State.$field -cnotmatch '^[0-9a-f]{64}$') {
             throw "Game-switch state $field is not lowercase 64-hex."
         }
     }
-    if ($null -ne $State.originalSaveFingerprint -and [string]$State.originalSaveFingerprint -cnotmatch '^[0-9a-f]{64}$') {
+    if ($null -ne $State.originalSaveFingerprint -and $State.originalSaveFingerprint -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Game-switch state originalSaveFingerprint is invalid.'
     }
-    if ([bool]$State.saveWasPresent -ne ($null -ne $State.originalSaveFingerprint)) {
+    if ($State.saveWasPresent -ne ($null -ne $State.originalSaveFingerprint)) {
         throw 'Game-switch state save presence and fingerprint disagree.'
     }
     $oldEntries = @(Get-MapEntries $State.oldHashes)
@@ -503,6 +928,101 @@ function Assert-ClosedState {
     foreach ($field in 'canonical', 'saveDirectory', 'downloadedOldDepot', 'originalGameDirectory', 'oldSmokeGameDirectory', 'currentSmokeGameDirectory', 'originalSaveDirectory', 'oldSmokeSaveDirectory', 'currentSmokeSaveDirectory') {
         Assert-ExistingDirectoryRootIsNotLink ([string]$State.$field) "Game-switch state $field"
     }
+}
+
+function Assert-LegacyClosedState {
+    param([Parameter(Mandatory)]$State)
+
+    Assert-ExactStateFieldSet $State $script:LegacyStateFields
+    if ($State.schemaVersion -isnot [long] -or $State.schemaVersion -ne 1) {
+        throw "Unsupported legacy game-switch state schema: $($State.schemaVersion)"
+    }
+    Assert-StringStateFieldSet $State @('appManifestSha256')
+    if ($State.appManifestSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Legacy game-switch state appManifestSha256 is not lowercase 64-hex.'
+    }
+    Assert-StateCommon $State
+}
+
+function Assert-ClosedState {
+    param([Parameter(Mandatory)]$State)
+
+    Assert-ExactStateFieldSet $State $script:StateFields
+    if ($State.schemaVersion -isnot [long] -or $State.schemaVersion -ne 2) {
+        throw "Unsupported game-switch state schema: $($State.schemaVersion)"
+    }
+    Assert-StringStateFieldSet $State @('appManifestAppId', 'appManifestNormalizedSha256')
+    Assert-StringMap $State.currentDepotManifests 'Game-switch state currentDepotManifests'
+    if ($State.appManifestAppId -cnotmatch '^[0-9]+$') {
+        throw 'Game-switch state appManifestAppId is invalid.'
+    }
+    if ($State.appManifestNormalizedSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Game-switch state appManifestNormalizedSha256 is not lowercase 64-hex.'
+    }
+    $pathAppId = Get-AppManifestPathAppId ([string]$State.appManifestPath)
+    if (-not [string]::Equals($pathAppId, [string]$State.appManifestAppId, [StringComparison]::Ordinal)) {
+        throw 'Game-switch state appManifestAppId does not match appManifestPath.'
+    }
+    $depotEntries = @(Get-MapEntries $State.currentDepotManifests)
+    if ($depotEntries.Count -eq 0) {
+        throw 'Game-switch state currentDepotManifests is empty.'
+    }
+    foreach ($entry in $depotEntries) {
+        if ($entry.Key -cnotmatch '^[0-9]+$' -or $entry.Value -cnotmatch '^[0-9]+$') {
+            throw 'Game-switch state currentDepotManifests is invalid.'
+        }
+    }
+    $matchingDepots = @($depotEntries | Where-Object {
+        [string]::Equals($_.Value, [string]$State.currentManifestId, [StringComparison]::Ordinal)
+    })
+    if ($matchingDepots.Count -ne 1) {
+        throw 'Game-switch state currentManifestId must occur exactly once in currentDepotManifests.'
+    }
+    Assert-StateCommon $State
+}
+
+function ConvertFrom-LegacyState {
+    param([Parameter(Mandatory)]$State)
+
+    Assert-LegacyClosedState $State
+    $evidence = Get-AppManifestEvidence ([string]$State.appManifestPath)
+    if (-not [string]::Equals([string]$evidence.RawSha256, [string]$State.appManifestSha256, [StringComparison]::Ordinal)) {
+        throw 'Legacy appmanifest hash mismatch; schema 1 cannot prove that only LastPlayed changed, so this state cannot be migrated safely.'
+    }
+    $appId = Get-AppManifestPathAppId ([string]$State.appManifestPath)
+    Assert-AppManifestCoreIdentity $evidence ([string]$State.appManifestPath) $appId ([string]$State.currentBuildId) ([string]$State.currentManifestId)
+
+    $migrated = [ordered]@{
+        schemaVersion = [long]2
+        attemptId = [string]$State.attemptId
+        phase = [string]$State.phase
+        canonical = [string]$State.canonical
+        saveDirectory = [string]$State.saveDirectory
+        appManifestPath = [string]$State.appManifestPath
+        downloadedOldDepot = [string]$State.downloadedOldDepot
+        originalGameDirectory = [string]$State.originalGameDirectory
+        oldSmokeGameDirectory = [string]$State.oldSmokeGameDirectory
+        currentSmokeGameDirectory = [string]$State.currentSmokeGameDirectory
+        originalSaveDirectory = [string]$State.originalSaveDirectory
+        oldSmokeSaveDirectory = [string]$State.oldSmokeSaveDirectory
+        currentSmokeSaveDirectory = [string]$State.currentSmokeSaveDirectory
+        saveWasPresent = [bool]$State.saveWasPresent
+        originalSaveFingerprint = $State.originalSaveFingerprint
+        appManifestAppId = $appId
+        appManifestNormalizedSha256 = [string]$evidence.NormalizedSha256
+        currentDepotManifests = $evidence.DepotManifests
+        oldBuildId = [string]$State.oldBuildId
+        currentBuildId = [string]$State.currentBuildId
+        oldManifestId = [string]$State.oldManifestId
+        currentManifestId = [string]$State.currentManifestId
+        oldHashes = $State.oldHashes
+        currentHashes = $State.currentHashes
+        oldFingerprint = [string]$State.oldFingerprint
+        currentFingerprint = [string]$State.currentFingerprint
+    }
+    $current = [pscustomobject]$migrated
+    Assert-ClosedState $current
+    return $current
 }
 
 function Get-StateTemporaryPath {
@@ -562,6 +1082,31 @@ function Assert-StateImmutableMatch {
     }
 }
 
+function Assert-NoDuplicateJsonProperty {
+    param(
+        [Parameter(Mandatory)][Text.Json.JsonElement]$Element,
+        [Parameter(Mandatory)][string]$JsonPath
+    )
+
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) {
+                throw "Game-switch state JSON contains duplicate property '$($property.Name)' at $JsonPath."
+            }
+            Assert-NoDuplicateJsonProperty $property.Value "$JsonPath.$($property.Name)"
+        }
+        return
+    }
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-NoDuplicateJsonProperty $item "$JsonPath[$index]"
+            $index++
+        }
+    }
+}
+
 function Read-StateDocument {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -569,13 +1114,45 @@ function Read-StateDocument {
     if ($stateItem.LinkType -or (($stateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
         throw "Game-switch state must not be a symlink or reparse point: $Path"
     }
+    $json = [IO.File]::ReadAllText($Path)
     try {
-        $state = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+        $document = [Text.Json.JsonDocument]::Parse($json)
     } catch {
         throw "Game-switch state is not valid JSON: $Path. $($_.Exception.Message)"
     }
-    Assert-ClosedState $state
-    return $state
+    try {
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw "Game-switch state JSON root must be an object: $Path"
+        }
+        Assert-NoDuplicateJsonProperty $document.RootElement '$'
+    } finally {
+        $document.Dispose()
+    }
+    try {
+        $state = $json | ConvertFrom-Json
+    } catch {
+        throw "Game-switch state cannot be materialized from JSON: $Path. $($_.Exception.Message)"
+    }
+    $schemaProperties = @($state.PSObject.Properties | Where-Object { $_.Name -ceq 'schemaVersion' })
+    if ($schemaProperties.Count -ne 1 -or $schemaProperties[0].Value -isnot [long]) {
+        throw 'Game-switch state schemaVersion is missing or is not an integer.'
+    }
+    switch ([long]$schemaProperties[0].Value) {
+        1 {
+            return [pscustomobject]@{
+                State = ConvertFrom-LegacyState $state
+                WasLegacy = $true
+            }
+        }
+        2 {
+            Assert-ClosedState $state
+            return [pscustomobject]@{
+                State = $state
+                WasLegacy = $false
+            }
+        }
+        default { throw "Unsupported game-switch state schema: $($schemaProperties[0].Value)" }
+    }
 }
 
 function Get-JournalTemporaryFiles {
@@ -589,6 +1166,16 @@ function Get-JournalTemporaryFiles {
     })
 }
 
+function Complete-LegacyStateMigration {
+    param([Parameter(Mandatory)]$Document)
+
+    $state = $Document.State
+    if ([bool]$Document.WasLegacy -and [string]$state.phase -cne 'restored') {
+        Write-StatePhase $state ([string]$state.phase)
+    }
+    return $state
+}
+
 function Read-StateWithRecovery {
     $temporaryFiles = @(Get-JournalTemporaryFiles)
     if ($temporaryFiles.Count -gt 1) {
@@ -599,25 +1186,25 @@ function Read-StateWithRecovery {
         return $null
     }
     if (-not $stateExists) {
-        $candidate = Read-StateDocument $temporaryFiles[0].FullName
-        if ([string]$candidate.phase -cne 'prepared') {
+        $candidateDocument = Read-StateDocument $temporaryFiles[0].FullName
+        if ([string]$candidateDocument.State.phase -cne 'prepared') {
             throw 'Ambiguous initial game-switch journal temporary is not in prepared phase.'
         }
         [IO.File]::Move($temporaryFiles[0].FullName, $StatePath, $false)
-        return $candidate
+        return Complete-LegacyStateMigration $candidateDocument
     }
 
-    $state = Read-StateDocument $StatePath
+    $stateDocument = Read-StateDocument $StatePath
     if ($temporaryFiles.Count -eq 1) {
-        $candidate = Read-StateDocument $temporaryFiles[0].FullName
-        Assert-StateImmutableMatch $state $candidate
-        if (-not (Test-AllowedTransition ([string]$state.phase) ([string]$candidate.phase))) {
-            throw "Ambiguous game-switch journal transition: $($state.phase) -> $($candidate.phase)."
+        $candidateDocument = Read-StateDocument $temporaryFiles[0].FullName
+        Assert-StateImmutableMatch $stateDocument.State $candidateDocument.State
+        if (-not (Test-AllowedTransition ([string]$stateDocument.State.phase) ([string]$candidateDocument.State.phase))) {
+            throw "Ambiguous game-switch journal transition: $($stateDocument.State.phase) -> $($candidateDocument.State.phase)."
         }
         [IO.File]::Move($temporaryFiles[0].FullName, $StatePath, $true)
-        $state = $candidate
+        $stateDocument = $candidateDocument
     }
-    return $state
+    return Complete-LegacyStateMigration $stateDocument
 }
 
 function Write-StatePhase {
@@ -740,6 +1327,8 @@ function Copy-TreePortable {
         [switch]$ExcludeBepInEx
     )
 
+    Assert-DirectoryTreeHasNoLinks $Source 'Smoke copy source'
+    Assert-DirectoryTreeHasNoLinks $Destination 'Smoke copy destination'
     [IO.Directory]::CreateDirectory($Destination) | Out-Null
     $items = @(Get-ChildItem -LiteralPath $Source -Force -Recurse)
     foreach ($item in $items) {
@@ -751,6 +1340,7 @@ function Copy-TreePortable {
             continue
         }
         $target = Join-Path $Destination $relative
+        Assert-NoExistingAncestorLink -Path $target -Label 'Smoke copy destination'
         if ($item.PSIsContainer) {
             [IO.Directory]::CreateDirectory($target) | Out-Null
         } else {
@@ -783,6 +1373,8 @@ function Invoke-RobocopyChecked {
 function Copy-BaseTree {
     param([string]$Source, [string]$Destination, [string]$OperationName)
 
+    Assert-DirectoryTreeHasNoLinks $Source "$OperationName base source"
+    Assert-DirectoryTreeHasNoLinks $Destination "$OperationName base destination"
     if ($IsWindows) {
         Invoke-RobocopyChecked $Source $Destination @('/XD', (Join-Path $Source 'BepInEx'))
     } else {
@@ -796,6 +1388,7 @@ function Copy-LoaderAllowlist {
 
     foreach ($entry in $script:LoaderAllowlist) {
         $sourcePath = Join-Path $Source $entry.Path
+        Assert-NoExistingAncestorLink -Path $sourcePath -Label "Loader allowlist source $($entry.Path)"
         if (-not (Test-Path -LiteralPath $sourcePath)) {
             if ($entry.Required) {
                 throw "Required loader allowlist entry is missing: $sourcePath"
@@ -803,12 +1396,16 @@ function Copy-LoaderAllowlist {
             continue
         }
         $destinationPath = Join-Path $Destination $entry.Path
+        Assert-NoExistingAncestorLink -Path $destinationPath -Label "Loader allowlist destination $($entry.Path)"
         if (Test-Path -LiteralPath $sourcePath -PathType Container) {
+            Assert-DirectoryTreeHasNoLinks $sourcePath "Loader allowlist source $($entry.Path)"
+            Assert-DirectoryTreeHasNoLinks $destinationPath "Loader allowlist destination $($entry.Path)"
             if ($IsWindows) {
                 Invoke-RobocopyChecked $sourcePath $destinationPath
             } else {
                 Copy-TreePortable $sourcePath $destinationPath
             }
+            Assert-DirectoryTreeHasNoLinks $destinationPath "Loader allowlist destination $($entry.Path)"
         } else {
             [IO.Directory]::CreateDirectory((Split-Path -Parent $destinationPath)) | Out-Null
             [IO.File]::Copy($sourcePath, $destinationPath, $true)
@@ -851,8 +1448,11 @@ function Copy-SmokeTree {
         $hashes = $State.currentHashes
         $fingerprint = [string]$State.currentFingerprint
     }
+    Assert-DirectoryTreeHasNoLinks $destination "$Build smoke game"
     Copy-BaseTree $source $destination $Build
     Copy-LoaderAllowlist ([string]$State.originalGameDirectory) $destination $Build
+    Assert-DirectoryTreeHasNoLinks $destination "$Build smoke game"
+    Assert-RequiredLoaderFileSet $destination "$Build smoke game"
     Assert-CleanSmokeLoader $destination
     Assert-NativeIdentity $destination $hashes $fingerprint "$Build smoke game"
 }
@@ -860,8 +1460,13 @@ function Copy-SmokeTree {
 function Assert-StaticEvidence {
     param($State)
 
-    if ((Get-Sha256 ([string]$State.appManifestPath)) -cne [string]$State.appManifestSha256) {
-        throw 'Appmanifest hash mismatch; the switch never edits or reconciles appmanifest changes.'
+    $manifestEvidence = Get-AppManifestEvidence ([string]$State.appManifestPath)
+    Assert-AppManifestCoreIdentity $manifestEvidence ([string]$State.appManifestPath) ([string]$State.appManifestAppId) ([string]$State.currentBuildId) ([string]$State.currentManifestId)
+    if (-not (Test-HashMapsEqual $manifestEvidence.DepotManifests $State.currentDepotManifests)) {
+        throw 'Appmanifest InstalledDepots identity mismatch.'
+    }
+    if (-not [string]::Equals([string]$manifestEvidence.NormalizedSha256, [string]$State.appManifestNormalizedSha256, [StringComparison]::Ordinal)) {
+        throw 'Appmanifest content changed outside the permitted decimal LastPlayed value.'
     }
     Assert-NativeIdentity ([string]$State.downloadedOldDepot) $State.oldHashes ([string]$State.oldFingerprint) 'Downloaded old depot'
 
@@ -895,11 +1500,18 @@ function Assert-ActivateOldInputs {
             throw "ActivateOld requires -$($item.Name)."
         }
     }
+    if ($null -eq $ExpectedOldNativeHash -or $ExpectedOldNativeHash.Count -eq 0) {
+        throw 'ActivateOld requires -ExpectedOldNativeHash.'
+    }
     if ($null -eq $ExpectedCurrentNativeHash -or $ExpectedCurrentNativeHash.Count -eq 0) {
         throw 'ActivateOld requires -ExpectedCurrentNativeHash.'
     }
 
-    $expected = ConvertTo-ExpectedHashMap $ExpectedCurrentNativeHash
+    $expectedOld = ConvertTo-ExpectedHashMap $ExpectedOldNativeHash 'ExpectedOldNativeHash'
+    $expectedCurrent = ConvertTo-ExpectedHashMap $ExpectedCurrentNativeHash 'ExpectedCurrentNativeHash'
+    if ((@(Get-OrdinalMapKeys $expectedOld) -join "`n") -cne (@(Get-OrdinalMapKeys $expectedCurrent) -join "`n")) {
+        throw 'ExpectedOldNativeHash and ExpectedCurrentNativeHash must contain the same closed paths.'
+    }
     if ($null -ne $State) {
         $comparisons = @(
             @{ Name = 'CanonicalGameDirectory'; Actual = Get-NormalizedAbsolutePath $CanonicalGameDirectory; Expected = [string]$State.canonical },
@@ -916,11 +1528,17 @@ function Assert-ActivateOldInputs {
                 throw "ActivateOld cannot resume with changed $($comparison.Name)."
             }
         }
-        if (-not (Test-HashMapsEqual $expected $State.currentHashes)) {
+        if (-not (Test-HashMapsEqual $expectedOld $State.oldHashes)) {
+            throw 'ActivateOld cannot resume with changed ExpectedOldNativeHash.'
+        }
+        if (-not (Test-HashMapsEqual $expectedCurrent $State.currentHashes)) {
             throw 'ActivateOld cannot resume with changed ExpectedCurrentNativeHash.'
         }
     }
-    return $expected
+    return [pscustomobject]@{
+        Old = $expectedOld
+        Current = $expectedCurrent
+    }
 }
 
 function Assert-ActivateOldPathSafety {
@@ -946,7 +1564,10 @@ function Assert-ActivateOldPathSafety {
 }
 
 function New-SwitchState {
-    param([Parameter(Mandatory)]$ExpectedMap)
+    param(
+        [Parameter(Mandatory)]$ExpectedOldMap,
+        [Parameter(Mandatory)]$ExpectedCurrentMap
+    )
 
     $canonical = Get-NormalizedAbsolutePath $CanonicalGameDirectory
     $save = Get-NormalizedAbsolutePath $SaveDirectory
@@ -971,18 +1592,33 @@ function New-SwitchState {
             throw "Build and manifest identifiers must contain decimal digits only: $identifier"
         }
     }
-    foreach ($loader in $script:LoaderAllowlist | Where-Object Required) {
+    foreach ($loader in $script:LoaderAllowlist) {
         $loaderPath = Join-Path $canonical $loader.Path
+        Assert-NoExistingAncestorLink -Path $loaderPath -Label "Loader allowlist source $($loader.Path)"
         if (-not (Test-Path -LiteralPath $loaderPath)) {
-            throw "Required loader allowlist entry is missing: $loaderPath"
+            if ($loader.Required) {
+                throw "Required loader allowlist entry is missing: $loaderPath"
+            }
+            continue
+        }
+        if (Test-Path -LiteralPath $loaderPath -PathType Container) {
+            Assert-DirectoryTreeHasNoLinks $loaderPath "Loader allowlist source $($loader.Path)"
         }
     }
+    Assert-RequiredLoaderFileSet $canonical 'Canonical game'
 
-    $currentHashes = Get-NativeHashMap $canonical $ExpectedMap
-    if (-not (Test-HashMapsEqual $currentHashes $ExpectedMap)) {
+    $manifestAppId = Get-AppManifestPathAppId $manifest
+    $manifestEvidence = Get-AppManifestEvidence $manifest
+    Assert-AppManifestCoreIdentity $manifestEvidence $manifest $manifestAppId ([string]$CurrentBuildId) ([string]$CurrentManifestId)
+
+    $currentHashes = Get-NativeHashMap $canonical $ExpectedCurrentMap
+    if (-not (Test-HashMapsEqual $currentHashes $ExpectedCurrentMap)) {
         throw 'Canonical game hash mismatch against ExpectedCurrentNativeHash.'
     }
-    $oldHashes = Get-NativeHashMap $depot $ExpectedMap
+    $oldHashes = Get-NativeHashMap $depot $ExpectedOldMap
+    if (-not (Test-HashMapsEqual $oldHashes $ExpectedOldMap)) {
+        throw 'Downloaded old depot hash mismatch against ExpectedOldNativeHash.'
+    }
     $attempt = [guid]::NewGuid().ToString('N')
     $saveWasPresent = Test-Path -LiteralPath $save -PathType Container
     if ((Test-Path -LiteralPath $save) -and -not $saveWasPresent) {
@@ -991,7 +1627,7 @@ function New-SwitchState {
     $saveFingerprint = if ($saveWasPresent) { Get-DirectoryFingerprint $save } else { $null }
 
     $state = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = [long]2
         attemptId = $attempt
         phase = 'prepared'
         canonical = $canonical
@@ -1006,7 +1642,9 @@ function New-SwitchState {
         currentSmokeSaveDirectory = "$save.modkit-$attempt-current-smoke"
         saveWasPresent = $saveWasPresent
         originalSaveFingerprint = $saveFingerprint
-        appManifestSha256 = Get-Sha256 $manifest
+        appManifestAppId = $manifestAppId
+        appManifestNormalizedSha256 = [string]$manifestEvidence.NormalizedSha256
+        currentDepotManifests = $manifestEvidence.DepotManifests
         oldBuildId = [string]$OldBuildId
         currentBuildId = [string]$CurrentBuildId
         oldManifestId = [string]$OldManifestId
@@ -1113,9 +1751,9 @@ function Assert-CurrentActiveTopology {
 function Invoke-ActivateOld {
     Assert-ActivateOldPathSafety
     $state = Read-StateWithRecovery
-    $expectedMap = Assert-ActivateOldInputs $state
+    $expectedMaps = Assert-ActivateOldInputs $state
     if ($null -eq $state) {
-        $state = New-SwitchState $expectedMap
+        $state = New-SwitchState $expectedMaps.Old $expectedMaps.Current
     }
     Assert-StaticEvidence $state
     if ([string]$state.phase -ceq 'restored') {

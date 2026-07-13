@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory)][string]$OldManifestId,
     [Parameter(Mandatory)][string]$CurrentBuildId,
     [Parameter(Mandatory)][string]$CurrentManifestId,
+    [Parameter(Mandatory)][string[]]$ExpectedOldNativeHash,
     [Parameter(Mandatory)][string[]]$ExpectedCurrentNativeHash,
     [Parameter(Mandatory)][string[]]$ModBuild,
     [Parameter(Mandatory)][string]$SupportedBuildsOutput,
@@ -41,6 +42,7 @@ $script:ApprovedModIds = @(
     'com.abmcar.farmtogether2.farmhandspeedmod'
 )
 $script:PathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+$script:ExpectedOldNativeHash = $ExpectedOldNativeHash
 $script:ExpectedCurrentNativeHash = $ExpectedCurrentNativeHash
 $script:ModBuild = $ModBuild
 $script:OperationHook = $OperationHook
@@ -476,6 +478,7 @@ function Invoke-SnapshotCapture {
         [Parameter(Mandatory)][string]$AttemptId
     )
 
+    Assert-ActiveSwitchForSnapshot $Label $AttemptId
     $finalDirectory = Join-Path $SnapshotRoot $BuildId
     if (Test-Path -LiteralPath $finalDirectory) {
         throw "Snapshot promotion ambiguity: final directory already exists for build $BuildId."
@@ -505,6 +508,7 @@ function Invoke-SnapshotCapture {
     Invoke-CaptureOperationPoint "after-fingerprint-$Label"
     Assert-SnapshotDirectoryFileSet $preparing $BuildId
     $null = Read-SnapshotDocument $recordPath $BuildId
+    Assert-ActiveSwitchForSnapshot $Label $AttemptId
     if (Test-Path -LiteralPath $finalDirectory) {
         throw "Snapshot promotion ambiguity: final directory appeared for build $BuildId."
     }
@@ -542,6 +546,7 @@ function Invoke-GameSwitch {
             OldManifestId = $OldManifestId
             CurrentBuildId = $CurrentBuildId
             CurrentManifestId = $CurrentManifestId
+            ExpectedOldNativeHash = $script:ExpectedOldNativeHash
             ExpectedCurrentNativeHash = $script:ExpectedCurrentNativeHash
         }
     } else {
@@ -577,6 +582,21 @@ function Read-ActiveSwitchAttempt {
     return [string]$state.attemptId
 }
 
+function Assert-ActiveSwitchForSnapshot {
+    param(
+        [Parameter(Mandatory)][ValidateSet('old', 'current')][string]$Label,
+        [Parameter(Mandatory)][string]$AttemptId
+    )
+
+    $action = if ($Label -ceq 'old') { 'ActivateOld' } else { 'ActivateCurrent' }
+    $phase = if ($Label -ceq 'old') { 'old-active' } else { 'current-smoke-active' }
+    Invoke-GameSwitch $action
+    $observedAttempt = Read-ActiveSwitchAttempt $phase
+    if (-not [string]::Equals($observedAttempt, $AttemptId, [StringComparison]::Ordinal)) {
+        throw "Game-switch attemptId changed while validating the $Label snapshot."
+    }
+}
+
 function Get-RestoredArchivePath {
     param([Parameter(Mandatory)][string]$AttemptId)
 
@@ -604,14 +624,19 @@ function Restore-AndArchivePriorSwitch {
 }
 
 function Assert-ExpectedNativeHashInputSet {
-    if ($script:ExpectedCurrentNativeHash.Count -eq 0) {
-        throw 'ExpectedCurrentNativeHash must not be empty.'
+    param(
+        [Parameter(Mandatory)][string[]]$Entries,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if ($Entries.Count -eq 0) {
+        throw "$Label must not be empty."
     }
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($entry in $script:ExpectedCurrentNativeHash) {
+    foreach ($entry in $Entries) {
         $separator = $entry.IndexOf('=')
         if ($separator -le 0 -or $separator -eq $entry.Length - 1) {
-            throw "ExpectedCurrentNativeHash entry must be relative-path=lowercase-sha256: $entry"
+            throw "$Label entry must be relative-path=lowercase-sha256: $entry"
         }
         $path = $entry.Substring(0, $separator).Replace('\', '/')
         $hash = $entry.Substring($separator + 1)
@@ -623,15 +648,18 @@ function Assert-ExpectedNativeHashInputSet {
             $path.Contains('//', [StringComparison]::Ordinal) -or
             @($path.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0
         ) {
-            throw "ExpectedCurrentNativeHash contains a non-canonical path: $entry"
+            throw "$Label contains a non-canonical path: $entry"
         }
         if ($hash -cnotmatch '^[0-9a-f]{64}$') {
-            throw "ExpectedCurrentNativeHash must use lowercase 64-hex SHA-256: $entry"
+            throw "$Label must use lowercase 64-hex SHA-256: $entry"
         }
         if (-not $seen.Add($path)) {
-            throw "ExpectedCurrentNativeHash contains a duplicate normalized path: $path"
+            throw "$Label contains a duplicate normalized path: $path"
         }
     }
+    [string[]]$paths = @($seen)
+    [Array]::Sort($paths, [StringComparer]::Ordinal)
+    return $paths
 }
 
 function Assert-ModBuildInputSet {
@@ -739,7 +767,11 @@ if (Test-Path -LiteralPath $SupportedBuildsOutput) {
         throw "SupportedBuildsOutput must be a regular file path: $SupportedBuildsOutput"
     }
 }
-Assert-ExpectedNativeHashInputSet
+$oldNativePaths = @(Assert-ExpectedNativeHashInputSet $script:ExpectedOldNativeHash 'ExpectedOldNativeHash')
+$currentNativePaths = @(Assert-ExpectedNativeHashInputSet $script:ExpectedCurrentNativeHash 'ExpectedCurrentNativeHash')
+if (($oldNativePaths -join "`n") -cne ($currentNativePaths -join "`n")) {
+    throw 'ExpectedOldNativeHash and ExpectedCurrentNativeHash must contain the same closed paths.'
+}
 Assert-ModBuildInputSet
 Assert-CapturePathTopology
 Assert-NoExistingAncestorLink -Path $CanonicalGameDirectory -Label 'CanonicalGameDirectory'

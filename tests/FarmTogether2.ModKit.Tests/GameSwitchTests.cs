@@ -27,7 +27,9 @@ public sealed class GameSwitchTests
         "after-copy-old-loader-doorstop_config.ini",
         "after-copy-old-loader-.doorstop_version",
         "after-copy-old-loader-winhttp.dll",
+        "after-copy-old-loader-dotnet",
         "after-copy-old-loader-BepInEx-core",
+        "after-copy-old-loader-BepInEx-unity-libs",
         "after-copy-old-loader-BepInEx-config-BepInEx.cfg",
         "before-journal-old-copy-prepared",
         "before-journal-old-activate-pending",
@@ -48,7 +50,9 @@ public sealed class GameSwitchTests
         "after-copy-current-loader-doorstop_config.ini",
         "after-copy-current-loader-.doorstop_version",
         "after-copy-current-loader-winhttp.dll",
+        "after-copy-current-loader-dotnet",
         "after-copy-current-loader-BepInEx-core",
+        "after-copy-current-loader-BepInEx-unity-libs",
         "after-copy-current-loader-BepInEx-config-BepInEx.cfg",
         "before-journal-current-copy-prepared",
         "before-journal-current-activate-pending",
@@ -170,6 +174,84 @@ public sealed class GameSwitchTests
         Assert.True(Directory.Exists(restored.GetProperty("currentSmokeSaveDirectory").GetString()!));
     }
 
+    [Fact]
+    public void ActivateOldRejectsLoaderWithoutBundledDotnetDirectoryBeforeMutation()
+    {
+        using Fixture fixture = new();
+        Directory.Delete(Path.Combine(fixture.Canonical, "dotnet"), recursive: true);
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("Required loader allowlist entry is missing");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+    }
+
+    [Theory]
+    [InlineData("dotnet/coreclr.dll")]
+    [InlineData("dotnet/System.Private.CoreLib.dll")]
+    [InlineData("BepInEx/core/BepInEx.Unity.IL2CPP.dll")]
+    public void ActivateOldRejectsMissingRequiredLoaderFileBeforeMutation(string relativePath)
+    {
+        using Fixture fixture = new();
+        File.Delete(Path.Combine(fixture.Canonical, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("required loader file is missing");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+    }
+
+    [Fact]
+    public void ActivateOldRejectsLinkedRequiredLoaderFileBeforeMutation()
+    {
+        using Fixture fixture = new();
+        string target = Path.Combine(fixture.DirectoryPath, "external-coreclr.dll");
+        File.WriteAllText(target, "must not be followed");
+        string coreClr = Path.Combine(fixture.Canonical, "dotnet", "coreclr.dll");
+        File.Delete(coreClr);
+        File.CreateSymbolicLink(coreClr, target);
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("symlink");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+    }
+
+    [Fact]
+    public void ActivateOldRejectsLinkedOptionalLoaderDirectoryBeforeMutation()
+    {
+        using Fixture fixture = new();
+        string unityLibraries = Path.Combine(fixture.Canonical, "BepInEx", "unity-libs");
+        string target = Path.Combine(fixture.DirectoryPath, "external-unity-libs");
+        Directory.Move(unityLibraries, target);
+        Directory.CreateSymbolicLink(unityLibraries, target);
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("symlink");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
+    }
+
+    [Fact]
+    public void ActivateOldCrashResumeRejectsLinkedPartialDestinationBeforeWritingThroughIt()
+    {
+        using Fixture fixture = new();
+        const string crashPoint = "after-copy-old-base";
+        fixture.RunSwitch("ActivateOld", crashPoint).AssertFailure(crashPoint);
+        string smoke = fixture.ReadState().GetProperty("oldSmokeGameDirectory").GetString()!;
+        string target = Path.Combine(fixture.DirectoryPath, "external-loader-target");
+        Directory.CreateDirectory(target);
+        string linkedDotnet = Path.Combine(smoke, "dotnet");
+        Directory.CreateSymbolicLink(linkedDotnet, target);
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("symlink");
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(target));
+        Directory.Delete(linkedDotnet);
+        fixture.RunSwitch("Restore").AssertSuccess();
+        fixture.AssertRestored();
+    }
+
     [Theory]
     [MemberData(nameof(ActivateOldCrashPoints))]
     public void ActivateOldResumesEveryPhysicalAndJournalCrash(string crashPoint)
@@ -258,6 +340,158 @@ public sealed class GameSwitchTests
     }
 
     [Fact]
+    public void RestoreAllowsOnlyTheDecimalLastPlayedValueToChange()
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        string changedManifest = fixture.RewriteAppManifest(lastPlayed: "1783922749");
+
+        fixture.RunSwitch("Restore").AssertSuccess();
+
+        fixture.AssertRestored(changedManifest);
+    }
+
+    [Fact]
+    public void RestoreNormalizesOnlyTheActualAppStateLastPlayedValueToken()
+    {
+        using Fixture fixture = new();
+        fixture.RewriteAppManifest(includeLastPlayedDecoys: true);
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        string changedManifest = fixture.RewriteAppManifest(lastPlayed: "1783922749", includeLastPlayedDecoys: true);
+
+        fixture.RunSwitch("Restore").AssertSuccess();
+
+        fixture.AssertRestored(changedManifest);
+    }
+
+    [Fact]
+    public void ActivateOldRejectsIncorrectRequiredAppManifestKeyCasingBeforeMutation()
+    {
+        using Fixture fixture = new();
+        string changedManifest = fixture.InitialAppManifestText.Replace("\"LastPlayed\"", "\"lastplayed\"", StringComparison.Ordinal);
+        File.WriteAllText(fixture.AppManifest, changedManifest);
+
+        fixture.RunSwitch("ActivateOld").AssertFailure("incorrect casing");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree(changedManifest);
+    }
+
+    [Theory]
+    [InlineData("appid", "appid mismatch")]
+    [InlineData("buildid", "buildid mismatch")]
+    [InlineData("manifest", "current manifest")]
+    [InlineData("depot", "InstalledDepots identity mismatch")]
+    [InlineData("state-flags", "outside the permitted")]
+    [InlineData("install-directory", "outside the permitted")]
+    [InlineData("whitespace", "outside the permitted")]
+    public void RestoreRejectsEveryOtherAppManifestIdentityOrByteChange(string change, string expectedError)
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        string changedManifest = change switch
+        {
+            "appid" => fixture.RewriteAppManifest(appId: "2418529"),
+            "buildid" => fixture.RewriteAppManifest(buildId: "24069958"),
+            "manifest" => fixture.RewriteAppManifest(manifestId: "2755117260250472999"),
+            "depot" => fixture.RewriteAppManifest(depotId: "2418599"),
+            "state-flags" => fixture.RewriteAppManifest(stateFlags: "6"),
+            "install-directory" => fixture.RewriteAppManifest(installDirectory: "Wrong Game"),
+            "whitespace" => File.ReadAllText(fixture.AppManifest).Replace("\"Universe\"     \"1\"", "\"Universe\"      \"1\"", StringComparison.Ordinal),
+            _ => throw new ArgumentOutOfRangeException(nameof(change), change, "Unknown appmanifest mutation."),
+        };
+        if (change == "whitespace")
+        {
+            File.WriteAllText(fixture.AppManifest, changedManifest);
+        }
+
+        fixture.RunSwitch("Restore").AssertFailure(expectedError);
+
+        fixture.AssertActiveBuild("old");
+        Assert.Equal(changedManifest, File.ReadAllText(fixture.AppManifest));
+        string original = fixture.ReadState().GetProperty("originalGameDirectory").GetString()!;
+        Assert.Equal("current-exe", File.ReadAllText(Path.Combine(original, "FarmTogether2.exe")));
+    }
+
+    [Fact]
+    public void LegacyStateWithAnUnchangedManifestMigratesDuringRestore()
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        fixture.RewriteStateAsLegacy();
+
+        fixture.RunSwitch("Restore").AssertSuccess();
+
+        fixture.AssertRestored();
+        Assert.Equal(2, fixture.ReadState().GetProperty("schemaVersion").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("ActivateOld", false)]
+    [InlineData("ActivateCurrent", true)]
+    public void LegacyActiveStateMigrationIsPersistedEvenWhenTheActionHasNoPhaseTransition(string action, bool currentActive)
+    {
+        using Fixture fixture = new();
+        if (currentActive)
+        {
+            fixture.PrepareCurrentActive();
+        }
+        else
+        {
+            fixture.RunSwitch("ActivateOld").AssertSuccess();
+        }
+        fixture.RewriteStateAsLegacy();
+
+        fixture.RunSwitch(action).AssertSuccess();
+
+        Assert.Equal(2, fixture.ReadState().GetProperty("schemaVersion").GetInt32());
+        fixture.AssertActiveBuild(currentActive ? "current" : "old");
+    }
+
+    [Theory]
+    [InlineData("before-journal-old-active")]
+    [InlineData("after-journal-old-active")]
+    public void LegacyActiveStateMigrationRecoversFromAtomicJournalCrashes(string crashPoint)
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        fixture.RewriteStateAsLegacy();
+
+        fixture.RunSwitch("ActivateOld", crashPoint).AssertFailure(crashPoint);
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+
+        Assert.Equal(2, fixture.ReadState().GetProperty("schemaVersion").GetInt32());
+        fixture.AssertActiveBuild("old");
+    }
+
+    [Fact]
+    public void LegacyTerminalStateCanBeValidatedBeforeTheCaptureArchivesIt()
+    {
+        using Fixture fixture = new();
+        fixture.PrepareCurrentActive();
+        fixture.RunSwitch("Restore").AssertSuccess();
+        fixture.RewriteStateAsLegacy();
+
+        fixture.RunSwitch("Restore").AssertSuccess();
+
+        fixture.AssertRestored();
+        Assert.Equal(1, fixture.ReadState().GetProperty("schemaVersion").GetInt32());
+    }
+
+    [Fact]
+    public void LegacyStateRejectsEvenLastPlayedDriftBecauseItCannotProveTheOnlyChangedBytes()
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        fixture.RewriteStateAsLegacy();
+        fixture.RewriteAppManifest(lastPlayed: "1783922749");
+
+        fixture.RunSwitch("Restore").AssertFailure("cannot be migrated safely");
+
+        fixture.AssertActiveBuild("old");
+    }
+
+    [Fact]
     public void ClosedJournalRejectsExtraFieldBeforeAnyMutation()
     {
         using Fixture fixture = new();
@@ -269,6 +503,44 @@ public sealed class GameSwitchTests
 
         fixture.RunSwitch("Restore").AssertFailure("schema");
         fixture.AssertActiveBuild("old");
+    }
+
+    [Theory]
+    [InlineData("schemaVersion")]
+    [InlineData("phase")]
+    [InlineData("currentHashes")]
+    [InlineData("currentDepotManifests")]
+    public void ClosedJournalRejectsDuplicateJsonPropertiesAtEveryRelevantDepth(string scope)
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        JsonElement state = fixture.ReadState();
+        string original = state.GetProperty("originalGameDirectory").GetString()!;
+        fixture.RewriteStateWithDuplicateProperty(scope);
+
+        fixture.RunSwitch("Restore").AssertFailure("duplicate property");
+
+        fixture.AssertActiveBuild("old");
+        Assert.Equal("current-exe", File.ReadAllText(Path.Combine(original, "FarmTogether2.exe")));
+    }
+
+    [Theory]
+    [InlineData("appManifestAppId")]
+    [InlineData("oldBuildId")]
+    [InlineData("currentManifestId")]
+    [InlineData("currentDepotManifests")]
+    [InlineData("saveWasPresent")]
+    public void ClosedJournalRejectsJsonValuesWithWrongTypesBeforeMutation(string field)
+    {
+        using Fixture fixture = new();
+        fixture.RunSwitch("ActivateOld").AssertSuccess();
+        string original = fixture.ReadState().GetProperty("originalGameDirectory").GetString()!;
+        fixture.RewriteStateFieldWithWrongType(field);
+
+        fixture.RunSwitch("Restore").AssertFailure("JSON");
+
+        fixture.AssertActiveBuild("old");
+        Assert.Equal("current-exe", File.ReadAllText(Path.Combine(original, "FarmTogether2.exe")));
     }
 
     [Theory]
@@ -292,6 +564,20 @@ public sealed class GameSwitchTests
         string[] entries = fixture.CurrentHashArguments.Append(fixture.CurrentHashArguments[0].Replace('/', '\\')).ToArray();
         fixture.RunSwitch("ActivateOld", expectedHashOverride: entries).AssertFailure("duplicate");
         Assert.True(Directory.Exists(fixture.Canonical));
+    }
+
+    [Fact]
+    public void ActivateOldRejectsOldDepotHashMismatchBeforeMutation()
+    {
+        using Fixture fixture = new();
+        string[] entries = fixture.OldHashArguments.ToArray();
+        string original = entries[0];
+        entries[0] = original[..^1] + (original[^1] == '0' ? '1' : '0');
+
+        fixture.RunSwitch("ActivateOld", expectedOldHashOverride: entries).AssertFailure("ExpectedOldNativeHash");
+
+        Assert.False(File.Exists(fixture.State));
+        fixture.AssertOriginalTree();
     }
 
     [Fact]
@@ -568,7 +854,21 @@ public sealed class GameSwitchTests
         ProcessResult result = fixture.RunCaptureWithCaptureAndRestoreFailure();
 
         result.AssertFailure("primary capture failure");
-        result.AssertFailure("Appmanifest hash mismatch");
+        result.AssertFailure("Appmanifest");
+    }
+
+    [Fact]
+    public void CaptureRevalidatesActiveNativeFilesBeforePromotingSnapshot()
+    {
+        using Fixture fixture = new();
+
+        ProcessResult result = fixture.RunCaptureWithActiveNativeMutation();
+
+        result.AssertFailure("hash mismatch");
+        Assert.False(Directory.Exists(Path.Combine(fixture.SnapshotRoot, "23821227")));
+        File.WriteAllText(Path.Combine(fixture.Canonical, "FarmTogether2.exe"), "old-exe");
+        fixture.RunSwitch("Restore").AssertSuccess();
+        fixture.AssertRestored();
     }
 
     [Fact]
@@ -600,12 +900,14 @@ public sealed class GameSwitchTests
 
     private static void AssertJsonSchema(JsonElement state)
     {
+        Assert.Equal(2, state.GetProperty("schemaVersion").GetInt32());
         string[] expected =
         {
             "schemaVersion", "attemptId", "phase", "canonical", "saveDirectory", "appManifestPath",
             "downloadedOldDepot", "originalGameDirectory", "oldSmokeGameDirectory", "currentSmokeGameDirectory",
             "originalSaveDirectory", "oldSmokeSaveDirectory", "currentSmokeSaveDirectory", "saveWasPresent",
-            "originalSaveFingerprint", "appManifestSha256", "oldBuildId", "currentBuildId", "oldManifestId",
+            "originalSaveFingerprint", "appManifestAppId", "appManifestNormalizedSha256", "currentDepotManifests",
+            "oldBuildId", "currentBuildId", "oldManifestId",
             "currentManifestId", "oldHashes", "currentHashes", "oldFingerprint", "currentFingerprint",
         };
         Assert.Equal(expected.Order(StringComparer.Ordinal), state.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
@@ -653,10 +955,12 @@ public sealed class GameSwitchTests
                 File.WriteAllText(Path.Combine(Save, "original.sav"), "original save");
             }
 
-            File.WriteAllText(AppManifest, "manifest must stay unchanged");
+            InitialAppManifestText = AppManifestText();
+            File.WriteAllText(AppManifest, InitialAppManifestText);
             CurrentHashes = Hashes(Canonical);
             OldHashes = Hashes(OldDepot);
             CurrentHashArguments = CurrentHashes.Select(pair => $"{pair.Key}={pair.Value}").ToArray();
+            OldHashArguments = OldHashes.Select(pair => $"{pair.Key}={pair.Value}").ToArray();
             WriteFakeExporter();
             WriteCaptureDriver();
         }
@@ -672,9 +976,11 @@ public sealed class GameSwitchTests
         public string FakeExporter { get; }
         public string CaptureDriver { get; }
         public string WaitLog { get; }
+        public string InitialAppManifestText { get; }
         public IReadOnlyDictionary<string, string> CurrentHashes { get; }
         public IReadOnlyDictionary<string, string> OldHashes { get; }
         public IReadOnlyList<string> CurrentHashArguments { get; }
+        public IReadOnlyList<string> OldHashArguments { get; }
 
         public sealed record IntegritySnapshot(
             string CanonicalTree,
@@ -732,7 +1038,8 @@ public sealed class GameSwitchTests
             string? canonicalOverride = null,
             string? saveOverride = null,
             string? depotOverride = null,
-            string? appManifestOverride = null)
+            string? appManifestOverride = null,
+            IReadOnlyList<string>? expectedOldHashOverride = null)
         {
             static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
             string selectedState = statePathOverride ?? State;
@@ -745,6 +1052,7 @@ public sealed class GameSwitchTests
             {
                 invocation.Append($" -CanonicalGameDirectory {Quote(selectedCanonical)} -SaveDirectory {Quote(selectedSave)} -AppManifestPath {Quote(selectedAppManifest)} -DownloadedOldDepot {Quote(selectedDepot)}");
                 invocation.Append(" -OldBuildId 23821227 -OldManifestId 7567480468616200523 -CurrentBuildId 24069957 -CurrentManifestId 2755117260250472086");
+                invocation.Append($" -ExpectedOldNativeHash @({string.Join(',', (expectedOldHashOverride ?? OldHashArguments).Select(Quote))})");
                 invocation.Append($" -ExpectedCurrentNativeHash @({string.Join(',', (expectedHashOverride ?? CurrentHashArguments).Select(Quote))})");
             }
 
@@ -788,6 +1096,28 @@ public sealed class GameSwitchTests
                 $" -ContractExporterPath {Quote(FakeExporter)} -OperationHook $hook",
                 StringComparison.Ordinal);
             string driver = Path.Combine(DirectoryPath, "capture-and-restore-failure-driver.ps1");
+            File.WriteAllText(driver, body);
+            return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
+        }
+
+        public ProcessResult RunCaptureWithActiveNativeMutation()
+        {
+            static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string body = File.ReadAllText(CaptureDriver);
+            string hook = $$"""
+                $hook = {
+                  param($point)
+                  if ($point -ceq 'after-fingerprint-old') {
+                    [IO.File]::WriteAllText('{{Path.Combine(Canonical, "FarmTogether2.exe").Replace("'", "''", StringComparison.Ordinal)}}', 'tampered-old-exe')
+                  }
+                }
+                """;
+            body = body.Replace("$wait = {", $"{hook}{Environment.NewLine}$wait = {{", StringComparison.Ordinal);
+            body = body.Replace(
+                $" -ContractExporterPath {Quote(FakeExporter)}",
+                $" -ContractExporterPath {Quote(FakeExporter)} -OperationHook $hook",
+                StringComparison.Ordinal);
+            string driver = Path.Combine(DirectoryPath, "active-native-mutation-capture-driver.ps1");
             File.WriteAllText(driver, body);
             return RunPowerShell(new[] { "-File", driver }, "FARMT2_CAPTURE_FAIL_AT", null);
         }
@@ -1066,12 +1396,16 @@ public sealed class GameSwitchTests
         public void AssertCleanLoaderOnly()
         {
             Assert.True(File.Exists(Path.Combine(Canonical, "winhttp.dll")));
+            Assert.True(File.Exists(Path.Combine(Canonical, "dotnet", "coreclr.dll")));
+            Assert.True(File.Exists(Path.Combine(Canonical, "dotnet", "System.Private.CoreLib.dll")));
             Assert.True(File.Exists(Path.Combine(Canonical, "BepInEx", "core", "loader.dll")));
+            Assert.True(File.Exists(Path.Combine(Canonical, "BepInEx", "core", "BepInEx.Unity.IL2CPP.dll")));
+            Assert.True(File.Exists(Path.Combine(Canonical, "BepInEx", "unity-libs", "2022.3.62.zip")));
             Assert.False(File.Exists(Path.Combine(Canonical, "BepInEx", "plugins", "private.dll")));
             Assert.False(File.Exists(Path.Combine(Canonical, "BepInEx", "config", "private.cfg")));
         }
 
-        public void AssertRestored()
+        public void AssertRestored(string? expectedAppManifest = null)
         {
             Assert.Equal("current-exe", File.ReadAllText(Path.Combine(Canonical, "FarmTogether2.exe")));
             Assert.Equal("original user tree", File.ReadAllText(Path.Combine(Canonical, "user-install.txt")));
@@ -1080,16 +1414,16 @@ public sealed class GameSwitchTests
             {
                 Assert.Equal("original save", File.ReadAllText(Path.Combine(Save, "original.sav")));
             }
-            Assert.Equal("manifest must stay unchanged", File.ReadAllText(AppManifest));
+            Assert.Equal(expectedAppManifest ?? InitialAppManifestText, File.ReadAllText(AppManifest));
             Assert.Equal("restored", ReadState().GetProperty("phase").GetString());
         }
 
-        public void AssertOriginalTree()
+        public void AssertOriginalTree(string? expectedAppManifest = null)
         {
             Assert.Equal("current-exe", File.ReadAllText(Path.Combine(Canonical, "FarmTogether2.exe")));
             Assert.Equal("original user tree", File.ReadAllText(Path.Combine(Canonical, "user-install.txt")));
             Assert.Equal("original save", File.ReadAllText(Path.Combine(Save, "original.sav")));
-            Assert.Equal("manifest must stay unchanged", File.ReadAllText(AppManifest));
+            Assert.Equal(expectedAppManifest ?? InitialAppManifestText, File.ReadAllText(AppManifest));
         }
 
         public void AssertCompletedSnapshot(string buildId)
@@ -1113,6 +1447,92 @@ public sealed class GameSwitchTests
             {
                 Assert.Empty(Directory.EnumerateDirectories(SnapshotRoot, "*.preparing", SearchOption.TopDirectoryOnly));
             }
+        }
+
+        public string RewriteAppManifest(
+            string lastPlayed = "1783921384",
+            string appId = "2418520",
+            string buildId = "24069957",
+            string depotId = "2418521",
+            string manifestId = "2755117260250472086",
+            string stateFlags = "4",
+            string installDirectory = "Farm Together 2",
+            bool includeExtraDepot = false,
+            bool includeLastPlayedDecoys = false)
+        {
+            string text = AppManifestText(lastPlayed, appId, buildId, depotId, manifestId, stateFlags, installDirectory, includeExtraDepot, includeLastPlayedDecoys);
+            File.WriteAllText(AppManifest, text);
+            return text;
+        }
+
+        public void RewriteStateAsLegacy()
+        {
+            JsonObject state = JsonNode.Parse(File.ReadAllText(State))!.AsObject();
+            state["schemaVersion"] = 1;
+            state.Remove("appManifestAppId");
+            state.Remove("appManifestNormalizedSha256");
+            state.Remove("currentDepotManifests");
+            state["appManifestSha256"] = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(AppManifest))).ToLowerInvariant();
+            File.WriteAllText(State, state.ToJsonString());
+        }
+
+        public void RewriteStateWithDuplicateProperty(string scope)
+        {
+            string json = File.ReadAllText(State);
+            JsonObject state = JsonNode.Parse(json)!.AsObject();
+            string target;
+            string replacement;
+            switch (scope)
+            {
+                case "schemaVersion":
+                    target = "\"schemaVersion\":2";
+                    replacement = $"{target},{target}";
+                    break;
+                case "phase":
+                    string phase = state["phase"]!.GetValue<string>();
+                    target = $"\"phase\":{JsonSerializer.Serialize(phase)}";
+                    replacement = $"{target},{target}";
+                    break;
+                case "currentHashes":
+                case "currentDepotManifests":
+                    JsonObject map = state[scope]!.AsObject();
+                    KeyValuePair<string, JsonNode?> entry = map.First();
+                    string serializedKey = JsonSerializer.Serialize(entry.Key);
+                    string serializedValue = entry.Value!.ToJsonString();
+                    string pair = $"{serializedKey}:{serializedValue}";
+                    target = $"\"{scope}\":{{{pair}";
+                    replacement = $"\"{scope}\":{{{pair},{pair}";
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unknown duplicate property scope.");
+            }
+            string changed = json.Replace(target, replacement, StringComparison.Ordinal);
+            Assert.NotEqual(json, changed);
+            File.WriteAllText(State, changed);
+        }
+
+        public void RewriteStateFieldWithWrongType(string field)
+        {
+            JsonObject state = JsonNode.Parse(File.ReadAllText(State))!.AsObject();
+            switch (field)
+            {
+                case "appManifestAppId":
+                case "oldBuildId":
+                case "currentManifestId":
+                    state[field] = long.Parse(state[field]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture);
+                    break;
+                case "currentDepotManifests":
+                    JsonObject depots = state[field]!.AsObject();
+                    string depot = depots.First().Key;
+                    depots[depot] = long.Parse(depots[depot]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture);
+                    break;
+                case "saveWasPresent":
+                    state[field] = state[field]!.GetValue<bool>() ? "true" : "false";
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(field), field, "Unknown wrong-type field.");
+            }
+            File.WriteAllText(State, state.ToJsonString());
         }
 
         public void Dispose()
@@ -1140,9 +1560,51 @@ public sealed class GameSwitchTests
             "UnityEngine.TextRenderingModule",
         };
 
+        private static string AppManifestText(
+            string lastPlayed = "1783921384",
+            string appId = "2418520",
+            string buildId = "24069957",
+            string depotId = "2418521",
+            string manifestId = "2755117260250472086",
+            string stateFlags = "4",
+            string installDirectory = "Farm Together 2",
+            bool includeExtraDepot = false,
+            bool includeLastPlayedDecoys = false)
+        {
+            string extraDepot = includeExtraDepot
+                ? "\t\t\"2418522\"\n\t\t{\n\t\t\t\"manifest\"\t\t\"9999999999999999999\"\n\t\t}\n"
+                : string.Empty;
+            string lastPlayedDecoys = includeLastPlayedDecoys
+                ? "\t\"FakeValue\"\t\t\"LastPlayed\"\n\t\"123\"\t\t\"not-the-runtime-value\"\n\t\"Nested\"\n\t{\n\t\t\"LastPlayed\"\t\t\"456\"\n\t}\n\t// \"LastPlayed\" \"789\"\n"
+                : string.Empty;
+            return $$"""
+                "AppState"
+                {
+                    "appid"        "{{appId}}"
+                    "Universe"     "1"
+                    "name"         "Farm Together 2"
+                    "StateFlags"   "{{stateFlags}}"
+                    "installdir"   "{{installDirectory}}"
+                {{lastPlayedDecoys}}    "LastUpdated"  "1783921000"
+                    "LastPlayed"   "{{lastPlayed}}"
+                    "buildid"      "{{buildId}}"
+                    "LastOwner"    "76561198000000000"
+                    "InstalledDepots"
+                    {
+                        "{{depotId}}"
+                        {
+                            "manifest"     "{{manifestId}}"
+                            "size"         "123456789"
+                        }
+                {{extraDepot}}    }
+                }
+                """ + Environment.NewLine;
+        }
+
         private void WriteCaptureDriver()
         {
             static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+            string oldHashes = string.Join(',', OldHashArguments.Select(Quote));
             string hashes = string.Join(',', CurrentHashArguments.Select(Quote));
             string body = $$"""
                 $ErrorActionPreference = 'Stop'
@@ -1157,7 +1619,7 @@ public sealed class GameSwitchTests
                   New-Item -ItemType Directory -Force -Path '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' | Out-Null
                   Set-Content -LiteralPath (Join-Path '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' "$buildId.sav") -Value $buildId -NoNewline
                 }
-                & '{{CaptureScript.Replace("'", "''", StringComparison.Ordinal)}}' -StatePath '{{State.Replace("'", "''", StringComparison.Ordinal)}}' -SnapshotRoot '{{SnapshotRoot.Replace("'", "''", StringComparison.Ordinal)}}' -CanonicalGameDirectory '{{Canonical.Replace("'", "''", StringComparison.Ordinal)}}' -SaveDirectory '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' -AppManifestPath '{{AppManifest.Replace("'", "''", StringComparison.Ordinal)}}' -DownloadedOldDepot '{{OldDepot.Replace("'", "''", StringComparison.Ordinal)}}' -OldBuildId 23821227 -OldManifestId 7567480468616200523 -CurrentBuildId 24069957 -CurrentManifestId 2755117260250472086 -ExpectedCurrentNativeHash @({{hashes}}) -ModBuild @('com.abmcar.farmtogether2.autosellmod=24069957','com.abmcar.farmtogether2.qolmod=23821227','com.abmcar.farmtogether2.automodrangemod=23821227','com.abmcar.farmtogether2.farmhandspeedmod=23821227') -SupportedBuildsOutput '{{SupportedBuilds.Replace("'", "''", StringComparison.Ordinal)}}' -WaitForLaunchAndClose $wait -ContractExporterPath '{{FakeExporter.Replace("'", "''", StringComparison.Ordinal)}}'
+                & '{{CaptureScript.Replace("'", "''", StringComparison.Ordinal)}}' -StatePath '{{State.Replace("'", "''", StringComparison.Ordinal)}}' -SnapshotRoot '{{SnapshotRoot.Replace("'", "''", StringComparison.Ordinal)}}' -CanonicalGameDirectory '{{Canonical.Replace("'", "''", StringComparison.Ordinal)}}' -SaveDirectory '{{Save.Replace("'", "''", StringComparison.Ordinal)}}' -AppManifestPath '{{AppManifest.Replace("'", "''", StringComparison.Ordinal)}}' -DownloadedOldDepot '{{OldDepot.Replace("'", "''", StringComparison.Ordinal)}}' -OldBuildId 23821227 -OldManifestId 7567480468616200523 -CurrentBuildId 24069957 -CurrentManifestId 2755117260250472086 -ExpectedOldNativeHash @({{oldHashes}}) -ExpectedCurrentNativeHash @({{hashes}}) -ModBuild @('com.abmcar.farmtogether2.autosellmod=24069957','com.abmcar.farmtogether2.qolmod=23821227','com.abmcar.farmtogether2.automodrangemod=23821227','com.abmcar.farmtogether2.farmhandspeedmod=23821227') -SupportedBuildsOutput '{{SupportedBuilds.Replace("'", "''", StringComparison.Ordinal)}}' -WaitForLaunchAndClose $wait -ContractExporterPath '{{FakeExporter.Replace("'", "''", StringComparison.Ordinal)}}'
                 """;
             File.WriteAllText(CaptureDriver, body);
         }
@@ -1225,13 +1687,19 @@ public sealed class GameSwitchTests
 
         private static void CreateLoader(string root)
         {
+            Directory.CreateDirectory(Path.Combine(root, "dotnet"));
             Directory.CreateDirectory(Path.Combine(root, "BepInEx", "core"));
             Directory.CreateDirectory(Path.Combine(root, "BepInEx", "config"));
+            Directory.CreateDirectory(Path.Combine(root, "BepInEx", "unity-libs"));
             File.WriteAllText(Path.Combine(root, "doorstop_config.ini"), "doorstop");
             File.WriteAllText(Path.Combine(root, ".doorstop_version"), "4");
             File.WriteAllText(Path.Combine(root, "winhttp.dll"), "loader");
+            File.WriteAllText(Path.Combine(root, "dotnet", "coreclr.dll"), "runtime");
+            File.WriteAllText(Path.Combine(root, "dotnet", "System.Private.CoreLib.dll"), "core library");
             File.WriteAllText(Path.Combine(root, "BepInEx", "core", "loader.dll"), "core");
+            File.WriteAllText(Path.Combine(root, "BepInEx", "core", "BepInEx.Unity.IL2CPP.dll"), "entry point");
             File.WriteAllText(Path.Combine(root, "BepInEx", "config", "BepInEx.cfg"), "loader config");
+            File.WriteAllText(Path.Combine(root, "BepInEx", "unity-libs", "2022.3.62.zip"), "unity libraries");
         }
 
         private static SortedDictionary<string, string> Hashes(string root)
