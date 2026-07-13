@@ -1,0 +1,380 @@
+name: Release reference package
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag to publish
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-ref-package-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: windows-2025
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      tag: ${{ steps.evidence.outputs.tag }}
+      commit: ${{ steps.evidence.outputs.commit }}
+      run-id: ${{ steps.evidence.outputs.run-id }}
+      artifact-id: ${{ steps.evidence.outputs.artifact-id }}
+      artifact-name: ${{ steps.evidence.outputs.artifact-name }}
+      artifact-digest: ${{ steps.evidence.outputs.artifact-digest }}
+    steps:
+      - name: Validate release event and stable tag
+        id: request
+        shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          CALLER_EVENT: ${{ github.event_name }}
+          CALLER_REF: ${{ github.ref }}
+        run: |
+          if ($env:REQUESTED_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'tag must be a strict stable vMAJOR.MINOR.PATCH tag.'
+          }
+          $validEvent =
+            ($env:CALLER_EVENT -ceq 'push' -and $env:CALLER_REF -ceq "refs/tags/$env:REQUESTED_TAG") -or
+            $env:CALLER_EVENT -ceq 'workflow_dispatch'
+          if (-not $validEvent) { throw 'Reference publication accepts only its tag push or workflow_dispatch recovery.' }
+          "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
+      - name: Check out exact reference tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ steps.request.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up locked .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+      - name: Assert exact .NET SDK
+        shell: pwsh
+        run: |
+          if ((dotnet --version).Trim() -cne '8.0.421') {
+            throw 'Exact .NET SDK 8.0.421 is required.'
+          }
+      - name: Parse annotated reference candidate evidence
+        id: evidence
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ steps.request.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tagRef = "refs/tags/$env:REQUESTED_TAG"
+          $tagType = @(& git cat-file -t $tagRef)
+          if ($LASTEXITCODE -ne 0 -or $tagType.Count -ne 1 -or $tagType[0].Trim() -cne 'tag') {
+            throw 'Reference Release tag must be annotated.'
+          }
+          $commit = @(& git rev-parse "$env:REQUESTED_TAG^{}")
+          if ($LASTEXITCODE -ne 0 -or $commit.Count -ne 1 -or $commit[0].Trim() -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Reference Release tag did not peel to one commit.'
+          }
+          $commit = $commit[0].Trim()
+          $head = @(& git rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $commit) {
+            throw 'Reference checkout is not the peeled tag commit.'
+          }
+          $remote = @(& git ls-remote --tags origin $tagRef "$tagRef^{}")
+          if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 2 -or
+              @($remote | Where-Object { $_ -cmatch "^[0-9a-f]{40}`t$([regex]::Escape($tagRef))$" }).Count -ne 1 -or
+              @($remote | Where-Object { $_ -ceq "$commit`t$tagRef^{}" }).Count -ne 1) {
+            throw 'Remote annotated tag identity differs from the checked out tag.'
+          }
+          $project = [xml](Get-Content -LiteralPath 'src/FarmTogether2.GameApi.Ref/FarmTogether2.GameApi.Ref.csproj' -Raw)
+          $versions = @($project.Project.PropertyGroup.Version)
+          if ($versions.Count -ne 1 -or $env:REQUESTED_TAG -cne "v$([string]$versions[0])") {
+            throw 'Reference Release tag differs from the package project version.'
+          }
+          $expectedArtifactName = "FarmTogether2.GameApi.Ref-candidate-$commit"
+          $message = @(& git for-each-ref '--format=%(contents)' $tagRef) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read annotated tag contents.' }
+          $lines = @($message -split "`r?`n" | Where-Object { $_ -cmatch '^Candidate-' })
+          if ($lines.Count -ne 4) { throw 'Annotated tag must contain exactly four candidate evidence fields.' }
+          function Read-Field([string]$Pattern, [string]$Label) {
+            $matches = @($lines | ForEach-Object { [regex]::Match($_, $Pattern) } | Where-Object Success)
+            if ($matches.Count -ne 1) { throw "Annotated tag must contain exactly one valid $Label field." }
+            return $matches[0].Groups[1].Value
+          }
+          $runText = Read-Field '^Candidate-Run-Id: ([1-9][0-9]*)$' 'Candidate-Run-Id'
+          $artifactText = Read-Field '^Candidate-Artifact-Id: ([1-9][0-9]*)$' 'Candidate-Artifact-Id'
+          $artifactName = Read-Field '^Candidate-Artifact-Name: (FarmTogether2\.GameApi\.Ref-candidate-[0-9a-f]{40})$' 'Candidate-Artifact-Name'
+          $digest = Read-Field '^Candidate-Artifact-Digest: (sha256:[0-9a-f]{64})$' 'Candidate-Artifact-Digest'
+          $runId = [long]::Parse($runText, [Globalization.CultureInfo]::InvariantCulture)
+          $artifactId = [long]::Parse($artifactText, [Globalization.CultureInfo]::InvariantCulture)
+          if ($artifactName -cne $expectedArtifactName) { throw 'Reference artifact name differs from the tag commit.' }
+          $run = @(& gh api --method GET "repos/$env:REPOSITORY/actions/runs/$runId") -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'Reference candidate run query failed.' }
+          $run = $run | ConvertFrom-Json
+          if ([long]$run.id -ne $runId -or [string]$run.event -cne 'push' -or
+              [string]$run.head_branch -cne 'main' -or [string]$run.head_sha -cne $commit -or
+              [string]$run.conclusion -cne 'success') {
+            throw 'Reference candidate run is not a successful main push for the tag commit.'
+          }
+          $artifact = @(& gh api --method GET "repos/$env:REPOSITORY/actions/artifacts/$artifactId") -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'Reference candidate artifact query failed.' }
+          $artifact = $artifact | ConvertFrom-Json
+          if ([long]$artifact.id -ne $artifactId -or [string]$artifact.name -cne $artifactName -or
+              [string]$artifact.digest -cne $digest -or [bool]$artifact.expired -or
+              [long]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -cne $commit) {
+            throw 'Reference candidate artifact metadata differs from annotated tag evidence.'
+          }
+          "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "run-id=$runId" >> $env:GITHUB_OUTPUT
+          "artifact-id=$artifactId" >> $env:GITHUB_OUTPUT
+          "artifact-name=$artifactName" >> $env:GITHUB_OUTPUT
+          "artifact-digest=$digest" >> $env:GITHUB_OUTPUT
+      - name: Receive and validate frozen reference candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ steps.evidence.outputs.commit }}
+          EXPECTED_RUN_ID: ${{ steps.evidence.outputs.run-id }}
+          EXPECTED_ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: ${{ steps.evidence.outputs.artifact-name }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Path 'artifacts/verify-evidence' | Out-Null
+          & 'scripts/Receive-VerifiedArtifact.ps1' `
+            -Repository $env:REPOSITORY `
+            -ArtifactId $env:EXPECTED_ARTIFACT_ID `
+            -ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME `
+            -ExpectedRunId $env:EXPECTED_RUN_ID `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedDigest $env:EXPECTED_ARTIFACT_DIGEST `
+            -ArchivePath 'artifacts/verify-evidence/candidate.zip' `
+            -DestinationDirectory 'artifacts/verify-candidate'
+          if ($LASTEXITCODE -ne 0) { throw "Reference candidate receiver failed with exit code $LASTEXITCODE." }
+          & 'scripts/Test-Candidate.ps1' `
+            -CandidateDirectory 'artifacts/verify-candidate' `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedRunId $env:EXPECTED_RUN_ID `
+            -ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME `
+            -CandidateKind Reference
+          if ($LASTEXITCODE -ne 0) { throw "Reference candidate verification failed with exit code $LASTEXITCODE." }
+      - name: Rebuild and compare reference assets
+        shell: pwsh
+        run: |
+          & dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode
+          if ($LASTEXITCODE -ne 0) { throw "Independent restore failed with exit code $LASTEXITCODE." }
+          & dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "Independent rebuild failed with exit code $LASTEXITCODE." }
+          & dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "Independent tests failed with exit code $LASTEXITCODE." }
+          New-Item -ItemType Directory -Path 'artifacts/ref-rebuild' | Out-Null
+          $output = @(& 'scripts/Pack-GameApiRef.ps1' -Configuration Release -OutputDirectory 'artifacts/ref-rebuild' -NoBuild)
+          if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) { throw 'Independent reference package writer failed.' }
+          $package = [IO.Path]::GetFullPath($output[0])
+          $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+            (Join-Path 'artifacts/ref-rebuild' 'SHA256SUMS.txt'),
+            "$hash  $([IO.Path]::GetFileName($package))`n",
+            [Text.UTF8Encoding]::new($false))
+          & 'scripts/Test-PublishedAssets.ps1' `
+            -PublishedDirectory 'artifacts/ref-rebuild' `
+            -CandidateDirectory 'artifacts/verify-candidate' `
+            -CandidateKind Reference
+          if ($LASTEXITCODE -ne 0) { throw "Rebuilt reference assets differ from the frozen candidate: $LASTEXITCODE." }
+
+  publish:
+    needs: verify
+    runs-on: windows-2025
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Validate verified reference tag
+        id: request
+        shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          VERIFIED_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          if ($env:REQUESTED_TAG -cne $env:VERIFIED_TAG -or
+              $env:REQUESTED_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'Publish tag differs from verified stable tag.'
+          }
+          "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
+      - name: Check out exact verified reference tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ steps.request.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up locked .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+      - name: Assert exact .NET SDK
+        shell: pwsh
+        run: |
+          if ((dotnet --version).Trim() -cne '8.0.421') {
+            throw 'Exact .NET SDK 8.0.421 is required.'
+          }
+      - name: Re-query frozen reference evidence
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ steps.request.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
+          EXPECTED_RUN_ID: ${{ needs.verify.outputs.run-id }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: ${{ needs.verify.outputs.artifact-name }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tagRef = "refs/tags/$env:REQUESTED_TAG"
+          $tagType = @(& git cat-file -t $tagRef)
+          if ($LASTEXITCODE -ne 0 -or $tagType.Count -ne 1 -or $tagType[0].Trim() -cne 'tag') { throw 'Publish reference tag is not annotated.' }
+          $commit = @(& git rev-parse "$env:REQUESTED_TAG^{}")
+          if ($LASTEXITCODE -ne 0 -or $commit.Count -ne 1 -or $commit[0].Trim() -cne $env:EXPECTED_COMMIT) {
+            throw 'Publish reference tag differs from verified commit.'
+          }
+          $head = @(& git rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $env:EXPECTED_COMMIT) {
+            throw 'Publish reference checkout differs from verified commit.'
+          }
+          $remote = @(& git ls-remote --tags origin $tagRef "$tagRef^{}")
+          if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 2 -or
+              @($remote | Where-Object { $_ -cmatch "^[0-9a-f]{40}`t$([regex]::Escape($tagRef))$" }).Count -ne 1 -or
+              @($remote | Where-Object { $_ -ceq "$env:EXPECTED_COMMIT`t$tagRef^{}" }).Count -ne 1) {
+            throw 'Publish remote reference tag differs from verified tag.'
+          }
+          $project = [xml](Get-Content -LiteralPath 'src/FarmTogether2.GameApi.Ref/FarmTogether2.GameApi.Ref.csproj' -Raw)
+          $versions = @($project.Project.PropertyGroup.Version)
+          if ($versions.Count -ne 1 -or $env:REQUESTED_TAG -cne "v$([string]$versions[0])" -or
+              $env:EXPECTED_ARTIFACT_NAME -cne "FarmTogether2.GameApi.Ref-candidate-$env:EXPECTED_COMMIT") {
+            throw 'Publish reference tag or candidate name differs from package identity.'
+          }
+          $message = @(& git for-each-ref '--format=%(contents)' $tagRef) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not reread reference tag contents.' }
+          $expectedLines = @(
+            "Candidate-Run-Id: $env:EXPECTED_RUN_ID",
+            "Candidate-Artifact-Id: $env:EXPECTED_ARTIFACT_ID",
+            "Candidate-Artifact-Name: $env:EXPECTED_ARTIFACT_NAME",
+            "Candidate-Artifact-Digest: $env:EXPECTED_ARTIFACT_DIGEST")
+          $candidateLines = @($message -split "`r?`n" | Where-Object { $_ -cmatch '^Candidate-' })
+          if ($candidateLines.Count -ne 4 -or @(Compare-Object $expectedLines $candidateLines -CaseSensitive).Count -ne 0) {
+            throw 'Publish reference evidence differs from verified evidence.'
+          }
+          $run = @(& gh api --method GET "repos/$env:REPOSITORY/actions/runs/$env:EXPECTED_RUN_ID") -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [long]$run.id -ne [long]$env:EXPECTED_RUN_ID -or
+              [string]$run.event -cne 'push' -or [string]$run.head_branch -cne 'main' -or
+              [string]$run.head_sha -cne $env:EXPECTED_COMMIT -or [string]$run.conclusion -cne 'success') {
+            throw 'Publish reference run query differs from verified evidence.'
+          }
+          $artifact = @(& gh api --method GET "repos/$env:REPOSITORY/actions/artifacts/$env:EXPECTED_ARTIFACT_ID") -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [long]$artifact.id -ne [long]$env:EXPECTED_ARTIFACT_ID -or
+              [string]$artifact.name -cne $env:EXPECTED_ARTIFACT_NAME -or
+              [string]$artifact.digest -cne $env:EXPECTED_ARTIFACT_DIGEST -or [bool]$artifact.expired -or
+              [long]$artifact.workflow_run.id -ne [long]$env:EXPECTED_RUN_ID -or
+              [string]$artifact.workflow_run.head_sha -cne $env:EXPECTED_COMMIT) {
+            throw 'Publish reference artifact query differs from verified evidence.'
+          }
+      - name: Receive and validate frozen reference candidate again
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
+          EXPECTED_RUN_ID: ${{ needs.verify.outputs.run-id }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: ${{ needs.verify.outputs.artifact-name }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Path 'artifacts/publish-evidence' | Out-Null
+          & 'scripts/Receive-VerifiedArtifact.ps1' `
+            -Repository $env:REPOSITORY `
+            -ArtifactId $env:EXPECTED_ARTIFACT_ID `
+            -ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME `
+            -ExpectedRunId $env:EXPECTED_RUN_ID `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedDigest $env:EXPECTED_ARTIFACT_DIGEST `
+            -ArchivePath 'artifacts/publish-evidence/candidate.zip' `
+            -DestinationDirectory 'artifacts/publish-candidate'
+          if ($LASTEXITCODE -ne 0) { throw "Reference candidate receiver failed with exit code $LASTEXITCODE." }
+          & 'scripts/Test-Candidate.ps1' `
+            -CandidateDirectory 'artifacts/publish-candidate' `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedRunId $env:EXPECTED_RUN_ID `
+            -ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME `
+            -CandidateKind Reference
+          if ($LASTEXITCODE -ne 0) { throw "Reference candidate verification failed with exit code $LASTEXITCODE." }
+      - name: Create or resume verified reference draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $candidateRoot = [IO.Path]::GetFullPath('artifacts/publish-candidate')
+          $candidate = Get-Content -LiteralPath (Join-Path $candidateRoot 'candidate.json') -Raw | ConvertFrom-Json
+          $assetNames = @([string]$candidate.packageAsset, [string]$candidate.checksumsAsset)
+          if ($assetNames.Count -ne 2 -or @($assetNames | Sort-Object -Unique).Count -ne 2) { throw 'Reference candidate release asset names are invalid.' }
+          $assetPaths = @($assetNames | ForEach-Object { Join-Path $candidateRoot $_ })
+          $viewOutput = @(& gh release view $env:RELEASE_TAG --repo $env:REPOSITORY --json tagName,isDraft,isPrerelease,assets 2>$null)
+          $viewExit = $LASTEXITCODE
+          if ($viewExit -ne 0) {
+            & gh release create $env:RELEASE_TAG --repo $env:REPOSITORY --draft --verify-tag --generate-notes --title $env:RELEASE_TAG @assetPaths
+            if ($LASTEXITCODE -ne 0) { throw 'Reference draft Release creation failed.' }
+            $release = @(& gh release view $env:RELEASE_TAG --repo $env:REPOSITORY --json tagName,isDraft,isPrerelease,assets) -join "`n" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Created reference draft query failed.' }
+          } else {
+            $release = ($viewOutput -join "`n") | ConvertFrom-Json
+          }
+          if ([string]$release.tagName -cne $env:RELEASE_TAG -or [bool]$release.isPrerelease) {
+            throw 'Existing reference Release identity is incompatible with stable publication.'
+          }
+          $remoteNames = @($release.assets | ForEach-Object { [string]$_.name })
+          if (@($remoteNames | Where-Object { $_ -notin $assetNames }).Count -ne 0 -or
+              @($remoteNames | Sort-Object -Unique).Count -ne $remoteNames.Count) {
+            throw 'Existing reference Release contains unexpected or duplicate assets.'
+          }
+          if (-not [bool]$release.isDraft -and @(Compare-Object ($assetNames | Sort-Object) ($remoteNames | Sort-Object) -CaseSensitive).Count -ne 0) {
+            throw 'Published reference Release is missing required assets.'
+          }
+          New-Item -ItemType Directory -Path 'artifacts/existing-release' | Out-Null
+          foreach ($name in $remoteNames) {
+            & gh release download $env:RELEASE_TAG --repo $env:REPOSITORY --pattern $name --dir 'artifacts/existing-release'
+            if ($LASTEXITCODE -ne 0) { throw "Existing reference asset download failed: $name" }
+            $candidateHash = (Get-FileHash -LiteralPath (Join-Path $candidateRoot $name) -Algorithm SHA256).Hash
+            $remoteHash = (Get-FileHash -LiteralPath (Join-Path 'artifacts/existing-release' $name) -Algorithm SHA256).Hash
+            if ($candidateHash -cne $remoteHash) { throw "Existing reference asset differs from frozen candidate: $name" }
+          }
+          if ([bool]$release.isDraft) {
+            foreach ($name in @($assetNames | Where-Object { $_ -notin $remoteNames })) {
+              & gh release upload $env:RELEASE_TAG --repo $env:REPOSITORY (Join-Path $candidateRoot $name)
+              if ($LASTEXITCODE -ne 0) { throw "Reference draft asset upload failed: $name" }
+            }
+          }
+          New-Item -ItemType Directory -Path 'artifacts/release-check' | Out-Null
+          foreach ($name in $assetNames) {
+            & gh release download $env:RELEASE_TAG --repo $env:REPOSITORY --pattern $name --dir 'artifacts/release-check'
+            if ($LASTEXITCODE -ne 0) { throw "Reference Release verification download failed: $name" }
+          }
+          & 'scripts/Test-PublishedAssets.ps1' `
+            -PublishedDirectory 'artifacts/release-check' `
+            -CandidateDirectory 'artifacts/publish-candidate' `
+            -CandidateKind Reference
+          if ($LASTEXITCODE -ne 0) { throw "Remote reference assets differ from frozen candidate: $LASTEXITCODE" }
+          if ([bool]$release.isDraft) {
+            & gh release edit $env:RELEASE_TAG --repo $env:REPOSITORY --draft=false --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw 'Publishing verified reference draft failed.' }
+          }

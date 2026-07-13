@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modkit-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - name: Check out complete repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up locked .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+      - name: Assert exact .NET SDK
+        shell: pwsh
+        run: |
+          if ((dotnet --version).Trim() -cne '8.0.421') {
+            throw 'Exact .NET SDK 8.0.421 is required.'
+          }
+      - name: Restore locked dependencies
+        shell: pwsh
+        run: |
+          & dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode
+          if ($LASTEXITCODE -ne 0) {
+            throw "Locked restore failed with exit code $LASTEXITCODE."
+          }
+      - name: Build with warnings as errors
+        shell: pwsh
+        run: |
+          & dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build failed with exit code $LASTEXITCODE."
+          }
+      - name: Run all tests
+        shell: pwsh
+        run: |
+          & dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tests failed with exit code $LASTEXITCODE."
+          }
+      - name: Write and inspect deterministic reference package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'artifacts/ref-candidate' | Out-Null
+          $packageOutput = @(& 'scripts/Pack-GameApiRef.ps1' `
+            -Configuration Release `
+            -OutputDirectory 'artifacts/ref-candidate' `
+            -NoBuild)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Reference package writer failed with exit code $LASTEXITCODE."
+          }
+          $project = [xml](Get-Content -LiteralPath 'src/FarmTogether2.GameApi.Ref/FarmTogether2.GameApi.Ref.csproj' -Raw)
+          $versions = @($project.Project.PropertyGroup.Version)
+          if ($versions.Count -ne 1 -or [string]$versions[0] -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'Reference package project must contain one stable version.'
+          }
+          $version = [string]$versions[0]
+          $package = Join-Path 'artifacts/ref-candidate' "FarmTogether2.GameApi.Ref.$version.nupkg"
+          if ($packageOutput.Count -ne 1 -or [IO.Path]::GetFullPath($packageOutput[0]) -cne [IO.Path]::GetFullPath($package)) {
+            throw 'Reference package writer returned an unexpected output path.'
+          }
+          & dotnet run `
+            --project 'tools/FarmTogether2.ModKit.Tool/FarmTogether2.ModKit.Tool.csproj' `
+            -c Release --no-build --no-restore -- `
+            ref-package verify `
+            --package $package `
+            --package-id 'FarmTogether2.GameApi.Ref' `
+            --version $version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Reference package inspection failed with exit code $LASTEXITCODE."
+          }
+          $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+            (Join-Path 'artifacts/ref-candidate' 'SHA256SUMS.txt'),
+            "$hash  $([IO.Path]::GetFileName($package))`n",
+            [Text.UTF8Encoding]::new($false))
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Bind main reference candidate metadata
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          ARTIFACT_NAME: FarmTogether2.GameApi.Ref-candidate-${{ github.sha }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $head = @(& git rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $env:EXPECTED_COMMIT) {
+            throw 'CI checkout differs from github.sha.'
+          }
+          & 'scripts/Invoke-ModKitTool.ps1' candidate write-reference `
+            --directory 'artifacts/ref-candidate' `
+            --artifact-name $env:ARTIFACT_NAME `
+            --package-id 'FarmTogether2.GameApi.Ref' `
+            --package-version $env:PACKAGE_VERSION `
+            --commit $env:EXPECTED_COMMIT `
+            --run-id $env:EXPECTED_RUN_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw "Reference candidate writer failed with exit code $LASTEXITCODE."
+          }
+          & 'scripts/Test-Candidate.ps1' `
+            -CandidateDirectory 'artifacts/ref-candidate' `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedRunId $env:EXPECTED_RUN_ID `
+            -ExpectedArtifactName $env:ARTIFACT_NAME `
+            -CandidateKind Reference
+          if ($LASTEXITCODE -ne 0) {
+            throw "Reference candidate verification failed with exit code $LASTEXITCODE."
+          }
+      - name: Validate generated caller workflows
+        shell: pwsh
+        run: |
+          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `
+            -RepositoryRoot 'tests/fixtures/mod-repository'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Caller workflow contract failed with exit code $LASTEXITCODE."
+          }
+      - name: Check repository diff and leakage policy
+        shell: pwsh
+        run: |
+          & git diff --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "git diff --check failed with exit code $LASTEXITCODE."
+          }
+          & 'scripts/Test-Repository.ps1' -RepositoryRoot '.'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Repository leakage scan failed with exit code $LASTEXITCODE."
+          }
+      - name: Upload main reference candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: FarmTogether2.GameApi.Ref-candidate-${{ github.sha }}
+          path: artifacts/ref-candidate/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Record immutable artifact evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+        run: |
+          "Artifact ID: $env:ARTIFACT_ID" >> $env:GITHUB_STEP_SUMMARY
+          "Artifact digest: $env:ARTIFACT_DIGEST" >> $env:GITHUB_STEP_SUMMARY

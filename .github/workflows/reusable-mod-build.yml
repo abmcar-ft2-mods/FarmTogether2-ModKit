@@ -1,0 +1,206 @@
+name: Reusable mod build
+
+on:
+  workflow_call:
+    inputs:
+      modkit-commit:
+        required: true
+        type: string
+      game-api-mode:
+        required: true
+        type: string
+      configuration:
+        required: true
+        type: string
+      candidate-kind:
+        required: true
+        type: string
+      retention-days:
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reusable-mod-build-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - name: Check out caller
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Check out locked ModKit bootstrap
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: abmcar/FarmTogether2-ModKit
+          ref: ${{ inputs.modkit-commit }}
+          path: .modkit/bootstrap
+          persist-credentials: false
+      - name: Set up locked .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+      - name: Assert exact .NET SDK
+        shell: pwsh
+        run: |
+          if ((dotnet --version).Trim() -cne '8.0.421') {
+            throw 'Exact .NET SDK 8.0.421 is required.'
+          }
+      - name: Validate locked build request
+        shell: pwsh
+        env:
+          MODKIT_COMMIT: ${{ inputs.modkit-commit }}
+          GAME_API_MODE: ${{ inputs.game-api-mode }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          CANDIDATE_KIND: ${{ inputs.candidate-kind }}
+          RETENTION_DAYS: ${{ inputs.retention-days }}
+          CALLER_EVENT: ${{ github.event_name }}
+          CALLER_REF: ${{ github.ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:MODKIT_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'modkit-commit must be lowercase 40-hex.'
+          }
+          if ($env:GAME_API_MODE -cne 'Hosted') {
+            throw 'Hosted reusable builds require game-api-mode Hosted.'
+          }
+          if ($env:CONFIGURATION -notin @('Debug', 'Release')) {
+            throw 'configuration must be Debug or Release.'
+          }
+          $retention = 0
+          if (-not [int]::TryParse($env:RETENTION_DAYS, [ref]$retention) -or $retention -lt 1 -or $retention -gt 90) {
+            throw 'retention-days must be an integer from 1 through 90.'
+          }
+          $validPair =
+            ($env:CALLER_EVENT -ceq 'push' -and
+              $env:CALLER_REF -ceq 'refs/heads/main' -and
+              $env:CANDIDATE_KIND -ceq 'candidate') -or
+            ($env:CALLER_EVENT -in @('pull_request', 'workflow_dispatch') -and
+              $env:CANDIDATE_KIND -ceq 'preview')
+          if (-not $validPair) {
+            throw 'Caller event, ref, and candidate-kind are not an allowed combination.'
+          }
+          $lock = Get-Content -LiteralPath 'modkit.lock.json' -Raw | ConvertFrom-Json
+          if ([string]$lock.workflowCommit -cne $env:MODKIT_COMMIT) {
+            throw 'modkit.lock.json workflowCommit differs from modkit-commit.'
+          }
+          $bootstrapHead = @(& git -C '.modkit/bootstrap' rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $bootstrapHead.Count -ne 1 -or $bootstrapHead[0].Trim() -cne $env:MODKIT_COMMIT) {
+            throw 'ModKit bootstrap checkout differs from modkit-commit.'
+          }
+      - name: Resolve locked ModKit package and tooling
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          & '.modkit/bootstrap/scripts/Resolve-ModKit.ps1' `
+            -LockFile 'modkit.lock.json' `
+            -Destination '.modkit/packages' `
+            -PropsOutput '.modkit/generated/ModKit.lock.props'
+          if ($LASTEXITCODE -ne 0) {
+            throw "ModKit resolver failed with exit code $LASTEXITCODE."
+          }
+      - name: Verify locked package and detached tooling
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $lock = Get-Content -LiteralPath 'modkit.lock.json' -Raw | ConvertFrom-Json
+          $packages = @(Get-ChildItem -LiteralPath '.modkit/packages' -File -Force)
+          if ($packages.Count -ne 1 -or $packages[0].Name -cne [string]$lock.assetName) {
+            throw 'Resolved package set differs from modkit.lock.json.'
+          }
+          $packageHash = (Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($packageHash -cne [string]$lock.sha256) {
+            throw 'Resolved package SHA-256 differs from modkit.lock.json.'
+          }
+          $head = @(& git -C '.modkit/tooling' rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne [string]$lock.workflowCommit) {
+            throw 'Resolved tooling HEAD differs from modkit.lock.json.'
+          }
+          $branch = @(& git -C '.modkit/tooling' rev-parse --abbrev-ref HEAD)
+          if ($LASTEXITCODE -ne 0 -or $branch.Count -ne 1 -or $branch[0].Trim() -cne 'HEAD') {
+            throw 'Resolved tooling checkout is not detached.'
+          }
+          $status = @(& git -C '.modkit/tooling' status --porcelain --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+            throw 'Resolved tooling checkout is dirty.'
+          }
+      - name: Build and test mod
+        shell: pwsh
+        env:
+          GAME_API_MODE: ${{ inputs.game-api-mode }}
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          & '.modkit/tooling/scripts/Invoke-ModBuild.ps1' `
+            -RepositoryRoot '.' `
+            -GameApiMode $env:GAME_API_MODE `
+            -Configuration $env:CONFIGURATION
+          if ($LASTEXITCODE -ne 0) {
+            throw "Mod build failed with exit code $LASTEXITCODE."
+          }
+      - name: Package candidate assets
+        shell: pwsh
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          New-Item -ItemType Directory -Path 'artifacts' | Out-Null
+          & '.modkit/tooling/scripts/Pack-Mod.ps1' `
+            -RepositoryRoot '.' `
+            -Configuration $env:CONFIGURATION `
+            -OutputDirectory 'artifacts/candidate'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Mod packaging failed with exit code $LASTEXITCODE."
+          }
+      - name: Bind candidate metadata
+        id: metadata
+        shell: pwsh
+        env:
+          CANDIDATE_KIND: ${{ inputs.candidate-kind }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $commit = @(& git rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $commit.Count -ne 1 -or $commit[0].Trim() -cne $env:EXPECTED_COMMIT) {
+            throw 'Caller checkout differs from github.sha.'
+          }
+          $mod = Get-Content -LiteralPath 'mod.json' -Raw | ConvertFrom-Json
+          $purpose = if ($env:CANDIDATE_KIND -ceq 'candidate') { 'candidate' } else { 'preview' }
+          $artifactName = "$($mod.assemblyName)-$purpose-$env:EXPECTED_COMMIT"
+          & '.modkit/tooling/scripts/Invoke-ModKitTool.ps1' candidate write-mod `
+            --directory 'artifacts/candidate' `
+            --artifact-name $artifactName `
+            --assembly-name ([string]$mod.assemblyName) `
+            --version ([string]$mod.version) `
+            --commit $env:EXPECTED_COMMIT `
+            --run-id $env:EXPECTED_RUN_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw "Candidate writer failed with exit code $LASTEXITCODE."
+          }
+          "artifact-name=$artifactName" >> $env:GITHUB_OUTPUT
+      - name: Upload candidate
+        id: candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.metadata.outputs.artifact-name }}
+          path: artifacts/candidate/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Record immutable artifact evidence
+        shell: pwsh
+        env:
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+        run: |
+          "Artifact ID: $env:ARTIFACT_ID" >> $env:GITHUB_STEP_SUMMARY
+          "Artifact digest: $env:ARTIFACT_DIGEST" >> $env:GITHUB_STEP_SUMMARY
