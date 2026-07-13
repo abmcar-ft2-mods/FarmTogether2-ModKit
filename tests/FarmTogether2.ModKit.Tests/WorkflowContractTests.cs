@@ -19,6 +19,26 @@ public sealed class WorkflowContractTests
     private const string DependabotPath = ".github/dependabot.yml";
     private const string CallerCiPath = "tests/fixtures/mod-repository/.github/workflows/ci.yml";
     private const string CallerReleasePath = "tests/fixtures/mod-repository/.github/workflows/release.yml";
+    private const string VerifiedDraftTail =
+        "          & '.modkit/tooling/scripts/Test-PublishedAssets.ps1' `\n" +
+        "            -PublishedDirectory 'artifacts/release-check' `\n" +
+        "            -CandidateDirectory 'artifacts/publish-candidate' `\n" +
+        "            -CandidateKind Mod\n" +
+        "          if ($LASTEXITCODE -ne 0) { throw \"Remote Release assets differ from frozen candidate: $LASTEXITCODE\" }\n" +
+        "          if ([bool]$release.isDraft) {\n" +
+        "            & gh release edit $env:RELEASE_TAG --repo $env:REPOSITORY --draft=false --verify-tag\n" +
+        "            if ($LASTEXITCODE -ne 0) { throw 'Publishing verified draft Release failed.' }\n" +
+        "          }";
+    private const string PrematurePublishTail =
+        "          if ([bool]$release.isDraft) {\n" +
+        "            & gh release edit $env:RELEASE_TAG --repo $env:REPOSITORY --draft=false --verify-tag\n" +
+        "            if ($LASTEXITCODE -ne 0) { throw 'Publishing verified draft Release failed.' }\n" +
+        "          }\n" +
+        "          & '.modkit/tooling/scripts/Test-PublishedAssets.ps1' `\n" +
+        "            -PublishedDirectory 'artifacts/release-check' `\n" +
+        "            -CandidateDirectory 'artifacts/publish-candidate' `\n" +
+        "            -CandidateKind Mod\n" +
+        "          if ($LASTEXITCODE -ne 0) { throw \"Remote Release assets differ from frozen candidate: $LASTEXITCODE\" }";
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
 
     public static TheoryData<string, string, string, string> RejectedMutations => new()
@@ -29,16 +49,32 @@ public sealed class WorkflowContractTests
         { CiPath, "'8.0.421'", "'8.0.422'", "different SDK assertion" },
         { CiPath, "cancel-in-progress: false", "cancel-in-progress: true", "cancelling concurrency" },
         { CiPath, "  pull_request:", "  pull_request_target:", "privileged pull request trigger" },
+        { CiPath, "  pull_request:", "  \"pull_request_target\":", "quoted privileged pull request trigger" },
+        { CiPath, "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:", "on: [push, pull_request_target]", "flow privileged pull request trigger" },
+        { CiPath, "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:", "on: >-\n  pull_request_target", "folded privileged pull request trigger" },
+        { CiPath, "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:", "on: |-\n  pull_request_target", "literal privileged pull request trigger" },
         { CallerReleasePath, "permissions: {}", "permissions:\n  contents: write", "caller top-level write permission" },
         { CallerReleasePath, "    with:", "    secrets: inherit\n    with:", "inherited secrets" },
+        { CallerReleasePath, "    with:", "    \"secrets\": \"inherit\"\n    with:", "quoted inherited secrets" },
+        { CallerReleasePath, "permissions: {}", "permissions: {}\nx-probe: { \"secrets\": \"inherit\" }", "flow inherited secrets" },
+        { CallerReleasePath, "    with:", "    secrets: >-\n      inherit\n    with:", "folded inherited secrets" },
+        { CallerReleasePath, "    with:", "    secrets: |-\n      inherit\n    with:", "literal inherited secrets" },
         { PublishPath, "      contents: read", "      contents: write", "write permission in verify" },
         { PublishPath, "          GH_TOKEN: ${{ github.token }}", "          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}", "different gh token" },
         { ReferenceReleasePath, "          GH_TOKEN: ${{ github.token }}", "          GH_TOKEN: missing", "missing gh authentication" },
         { ReferenceReleasePath, "& gh api", "& gh run download 1\n          & gh api", "gh run download" },
         { ReferenceReleasePath, "      - name: Set up locked .NET SDK", "      - uses: softprops/action-gh-release@main\n      - name: Set up locked .NET SDK", "third-party Release action" },
+        { PublishPath, "      - name: Receive and validate frozen candidate", "      - name: Download candidate through generic artifact action\n        uses: " + DownloadArtifact + "\n      - name: Receive and validate frozen candidate", "download-artifact used in mod verify" },
+        { PublishPath, "      - name: Receive and validate frozen candidate again", "      - name: Download candidate through generic artifact action\n        uses: " + DownloadArtifact + "\n      - name: Receive and validate frozen candidate again", "download-artifact used in mod publish" },
+        { ReferenceReleasePath, "      - name: Receive and validate frozen reference candidate", "      - name: Download candidate through generic artifact action\n        uses: " + DownloadArtifact + "\n      - name: Receive and validate frozen reference candidate", "download-artifact used in reference verify" },
+        { ReferenceReleasePath, "      - name: Receive and validate frozen reference candidate again", "      - name: Download candidate through generic artifact action\n        uses: " + DownloadArtifact + "\n      - name: Receive and validate frozen reference candidate again", "download-artifact used in reference publish" },
         { BuildPath, "          path: .modkit/bootstrap", "          path: .modkit/tooling", "bootstrap and resolver target collision" },
         { BuildPath, "'.modkit/bootstrap/scripts/Resolve-ModKit.ps1'", "'.modkit/tooling/scripts/Resolve-ModKit.ps1'", "untrusted resolver" },
         { BuildPath, "-Destination '.modkit/packages'", "-Destination '.modkit/bootstrap'", "resolver overwrites bootstrap" },
+        { PublishPath, "      - name: Check out caller at requested tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out caller at requested tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "mod verify shallow tag checkout" },
+        { PublishPath, "      - name: Check out caller at verified tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out caller at verified tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "mod publish shallow tag checkout" },
+        { ReferenceReleasePath, "      - name: Check out exact reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out exact reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "reference verify shallow tag checkout" },
+        { ReferenceReleasePath, "      - name: Check out exact verified reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out exact verified reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "reference publish shallow tag checkout" },
         { BuildPath, "(Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256)", "('unchecked')", "missing package hash verification" },
         { BuildPath, "rev-parse --abbrev-ref HEAD", "rev-parse HEAD", "missing detached HEAD verification" },
         { BuildPath, "$env:CALLER_REF -ceq 'refs/heads/main'", "$env:CALLER_REF -like 'refs/heads/*'", "non-main candidate ref" },
@@ -58,6 +94,7 @@ public sealed class WorkflowContractTests
         { PublishPath, "--draft --verify-tag --generate-notes", "--verify-tag --generate-notes", "non-draft first release" },
         { PublishPath, "--draft --verify-tag --generate-notes", "--draft --generate-notes", "missing tag verification" },
         { PublishPath, "--draft --verify-tag --generate-notes", "--draft --verify-tag", "missing generated notes" },
+        { PublishPath, VerifiedDraftTail, PrematurePublishTail, "draft published before remote asset verification" },
         { PublishPath, "[string]$run.head_branch -cne 'main'", "[string]$run.head_branch -cne 'develop'", "candidate not from main" },
         { PublishPath, "$tagType[0].Trim() -cne 'tag'", "$tagType[0].Trim() -cne 'commit'", "lightweight tag accepted" },
         { PublishPath, "$lines.Count -ne 4", "$lines.Count -lt 4", "duplicate annotated field accepted" },
@@ -190,8 +227,10 @@ public sealed class WorkflowContractTests
         HashSet<string> officialActions = [Checkout, SetupDotNet, UploadArtifact, DownloadArtifact];
         foreach ((string path, string text) in files)
         {
-            Require(!Regex.IsMatch(text, @"(?im)^\s*pull_request_target\s*:"), $"{path} uses pull_request_target.");
-            Require(!Regex.IsMatch(text, @"(?im)^\s*secrets\s*:\s*inherit\s*$"), $"{path} inherits secrets.");
+            YamlMappingNode document = documents[path];
+            if (TryGet(document, "on", out YamlNode? triggers))
+                Require(!ContainsScalar(triggers!, "pull_request_target"), $"{path} uses pull_request_target.");
+            Require(!ContainsMappingEntry(document, "secrets", "inherit"), $"{path} inherits secrets.");
             Require(!Regex.IsMatch(text, @"(?i)\bgh\s+run\s+download\b"), $"{path} uses gh run download.");
             Require(!Regex.IsMatch(text, @"(?i)Expand-Archive|\b7z(?:\.exe)?\b"), $"{path} manually extracts candidate evidence.");
             Require(!Regex.IsMatch(text, @"(?im)^\s*(?:-\s*)?uses\s*:\s*(?:softprops/|ncipollo/|marvinpinto/)", RegexOptions.CultureInvariant), $"{path} uses a third-party Release action.");
@@ -336,8 +375,8 @@ public sealed class WorkflowContractTests
         RequirePermissions(publish, new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "write" }, "mod publish");
         Require(Scalar(publish, "needs", PublishPath) == "verify", "Mod publish must depend on verify.");
         ValidateAnnotatedEvidence(text, "Mod");
-        ValidatePublishJob(text, verify, "verify", isReference: false);
-        ValidatePublishJob(text, publish, "publish", isReference: false);
+        ValidatePublishJob(verify, "verify", isReference: false);
+        ValidatePublishJob(publish, "publish", isReference: false);
         string verifyScripts = JoinScripts(verify, "mod verify");
         AssertOrder(verifyScripts, "Receive-VerifiedArtifact.ps1", "Test-Candidate.ps1", "Invoke-ModBuild.ps1", "Pack-Mod.ps1", "Test-PublishedAssets.ps1");
         string publishScripts = JoinScripts(publish, "mod publish");
@@ -358,8 +397,8 @@ public sealed class WorkflowContractTests
         RequirePermissions(publish, new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "write" }, "reference publish");
         Require(Scalar(publish, "needs", ReferenceReleasePath) == "verify", "Reference publish must depend on verify.");
         ValidateAnnotatedEvidence(text, "Reference");
-        ValidatePublishJob(text, verify, "verify", isReference: true);
-        ValidatePublishJob(text, publish, "publish", isReference: true);
+        ValidatePublishJob(verify, "verify", isReference: true);
+        ValidatePublishJob(publish, "publish", isReference: true);
         string verifyScripts = JoinScripts(verify, "reference verify");
         AssertOrder(verifyScripts, "Receive-VerifiedArtifact.ps1", "Test-Candidate.ps1", "Pack-GameApiRef.ps1", "Test-PublishedAssets.ps1");
         Require(verifyScripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
@@ -394,11 +433,23 @@ public sealed class WorkflowContractTests
         Require(text.Contains("artifact.workflow_run.id", StringComparison.Ordinal) && text.Contains("artifact.workflow_run.head_sha", StringComparison.Ordinal), $"{kind} publish must bind artifact run and commit.");
     }
 
-    private static void ValidatePublishJob(string workflowText, YamlMappingNode job, string jobName, bool isReference)
+    private static void ValidatePublishJob(YamlMappingNode job, string jobName, bool isReference)
     {
         string label = $"{(isReference ? "reference" : "mod")} {jobName}";
+        YamlMappingNode[] steps = Sequence(job, "steps", label).Children
+            .Select((step, index) => AsMapping(step, $"{label} step {index}"))
+            .ToArray();
         string scripts = JoinScripts(job, label);
-        Require(workflowText.Contains("fetch-depth: 0", StringComparison.Ordinal), $"{label} must fetch full tag history.");
+        Require(!steps.Any(step => OptionalScalar(step, "uses") is string action &&
+            action.StartsWith("actions/download-artifact@", StringComparison.Ordinal)), $"{label} may not use actions/download-artifact.");
+        YamlMappingNode[] tagCheckouts = steps
+            .Where(step => OptionalScalar(step, "uses") == Checkout &&
+                OptionalScalar(Mapping(step, "with", label, required: false), "path") is null)
+            .ToArray();
+        Require(tagCheckouts.Length == 1, $"{label} needs exactly one tag checkout.");
+        YamlMappingNode tagCheckoutInputs = Mapping(tagCheckouts[0], "with", label);
+        Require(!string.IsNullOrWhiteSpace(OptionalScalar(tagCheckoutInputs, "ref")), $"{label} tag checkout must select a ref.");
+        Require(Scalar(tagCheckoutInputs, "fetch-depth", label) == "0", $"{label} tag checkout must fetch full history.");
         if (!isReference)
         {
             Require(CountInJob(job, step => OptionalScalar(step, "uses") == Checkout &&
@@ -415,8 +466,7 @@ public sealed class WorkflowContractTests
         {
             Require(scripts.Contains("FarmTogether2.GameApi.Ref.csproj", StringComparison.Ordinal) && scripts.Contains("$env:REQUESTED_TAG -cne \"v$([string]$versions[0])\"", StringComparison.Ordinal), $"{label} must bind tag to reference package version.");
         }
-        string[] receiverSteps = Sequence(job, "steps", label).Children
-            .Select((step, index) => AsMapping(step, $"{label} step {index}"))
+        string[] receiverSteps = steps
             .Select(step => OptionalScalar(step, "run"))
             .Where(run => run is not null && run.Contains("Receive-VerifiedArtifact.ps1", StringComparison.Ordinal))
             .Cast<string>()
@@ -443,15 +493,19 @@ public sealed class WorkflowContractTests
         Require(boundary.Groups["kind"].Value == expectedKind, $"{label} uses the wrong candidate kind.");
         Require(scripts.Contains("$tagType[0].Trim() -cne 'tag'", StringComparison.Ordinal), $"{label} must reject lightweight tags.");
         Require(scripts.Contains("[string]$run.head_branch -cne 'main'", StringComparison.Ordinal), $"{label} must require a main-push candidate run.");
-        Require(!scripts.Contains("actions/download-artifact", StringComparison.Ordinal), $"{label} may not substitute actions/download-artifact for the receiver.");
     }
 
     private static void ValidateDraftRelease(string scripts)
     {
         Require(scripts.Contains("gh release create", StringComparison.Ordinal) &&
                 scripts.Contains("--draft --verify-tag --generate-notes", StringComparison.Ordinal), "Release must be created draft-first with tag verification and generated notes.");
-        Require(scripts.Contains("gh release download", StringComparison.Ordinal) && scripts.Contains("Test-PublishedAssets.ps1", StringComparison.Ordinal), "Remote Release assets must be verified before publication.");
         Require(scripts.Contains("gh release edit", StringComparison.Ordinal) && scripts.Contains("--draft=false --verify-tag", StringComparison.Ordinal), "Verified draft must be explicitly published with tag verification.");
+        int lastDownload = scripts.LastIndexOf("gh release download", StringComparison.Ordinal);
+        int publishedAssetCheck = scripts.IndexOf("Test-PublishedAssets.ps1", StringComparison.Ordinal);
+        int firstPublish = scripts.IndexOf("gh release edit", StringComparison.Ordinal);
+        Require(publishedAssetCheck == scripts.LastIndexOf("Test-PublishedAssets.ps1", StringComparison.Ordinal), "Publish must run exactly one remote asset verifier.");
+        Require(lastDownload >= 0 && lastDownload < publishedAssetCheck && publishedAssetCheck < firstPublish,
+            "Release downloads and remote asset verification must finish before publication.");
         Require(!scripts.Contains("artifacts/rebuild", StringComparison.Ordinal), "Publish may upload only the original frozen candidate.");
     }
 
@@ -588,6 +642,37 @@ public sealed class WorkflowContractTests
         }
         value = null;
         return false;
+    }
+
+    private static bool ContainsScalar(YamlNode node, string expected)
+    {
+        return node switch
+        {
+            YamlScalarNode scalar => string.Equals(scalar.Value?.Trim(), expected, StringComparison.Ordinal),
+            YamlSequenceNode sequence => sequence.Children.Any(child => ContainsScalar(child, expected)),
+            YamlMappingNode mapping => mapping.Children.Any(pair =>
+                ContainsScalar(pair.Key, expected) || ContainsScalar(pair.Value, expected)),
+            _ => false
+        };
+    }
+
+    private static bool ContainsMappingEntry(YamlNode node, string expectedKey, string expectedValue)
+    {
+        return node switch
+        {
+            YamlSequenceNode sequence => sequence.Children.Any(child => ContainsMappingEntry(child, expectedKey, expectedValue)),
+            YamlMappingNode mapping => mapping.Children.Any(pair =>
+                ScalarEquals(pair.Key, expectedKey) && ScalarEquals(pair.Value, expectedValue) ||
+                ContainsMappingEntry(pair.Key, expectedKey, expectedValue) ||
+                ContainsMappingEntry(pair.Value, expectedKey, expectedValue)),
+            _ => false
+        };
+    }
+
+    private static bool ScalarEquals(YamlNode node, string expected)
+    {
+        return node is YamlScalarNode scalar &&
+            string.Equals(scalar.Value?.Trim(), expected, StringComparison.Ordinal);
     }
 
     private static YamlMappingNode AsMapping(YamlNode node, string label)
