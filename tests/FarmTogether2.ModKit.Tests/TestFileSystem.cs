@@ -7,28 +7,42 @@ internal static class TestFileSystem
         if (!Directory.Exists(path))
             return;
 
-        ClearReadOnlyAttributes(path);
-        Directory.Delete(path, recursive: true);
-    }
-
-    private static void ClearReadOnlyAttributes(string path)
-    {
-        var pending = new Stack<string>();
-        pending.Push(path);
-        while (pending.TryPop(out string? current))
+        var pending = new Stack<(string Path, FileAttributes Attributes)>();
+        var directories = new Stack<string>();
+        pending.Push((path, File.GetAttributes(path)));
+        while (pending.TryPop(out (string Path, FileAttributes Attributes) current))
         {
-            FileAttributes attributes = File.GetAttributes(current);
+            FileAttributes attributes = current.Attributes;
             bool isDirectory = (attributes & FileAttributes.Directory) != 0;
             bool isReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
 
-            if (isDirectory && !isReparsePoint)
+            if ((attributes & FileAttributes.ReadOnly) != 0)
             {
-                foreach (string entry in Directory.EnumerateFileSystemEntries(current))
-                    pending.Push(entry);
+                attributes &= ~FileAttributes.ReadOnly;
+                File.SetAttributes(current.Path, attributes);
             }
 
-            if ((attributes & FileAttributes.ReadOnly) != 0)
-                File.SetAttributes(current, attributes & ~FileAttributes.ReadOnly);
+            if (isReparsePoint)
+            {
+                if (isDirectory)
+                    Directory.Delete(current.Path);
+                else
+                    File.Delete(current.Path);
+                continue;
+            }
+
+            if (!isDirectory)
+            {
+                File.Delete(current.Path);
+                continue;
+            }
+
+            directories.Push(current.Path);
+            foreach (string entry in Directory.EnumerateFileSystemEntries(current.Path))
+                pending.Push((entry, File.GetAttributes(entry)));
         }
+
+        while (directories.TryPop(out string? directory))
+            Directory.Delete(directory);
     }
 }

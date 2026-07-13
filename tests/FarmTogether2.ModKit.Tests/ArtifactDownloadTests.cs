@@ -4,6 +4,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -172,7 +173,7 @@ public sealed class ArtifactDownloadTests
         string outsideParent = Path.Combine(outside, "container");
         Directory.CreateDirectory(outsideParent);
         Directory.Delete(fixture.CacheRoot, recursive: true);
-        CreateDirectoryJunction(fixture.CacheRoot, outside);
+        TestJunction.Create(fixture.CacheRoot, outside);
 
         ProcessResult result = fixture.Run();
 
@@ -590,35 +591,6 @@ public sealed class ArtifactDownloadTests
         }
     }
 
-    private static void CreateDirectoryJunction(string linkPath, string targetPath)
-    {
-        var startInfo = new ProcessStartInfo("pwsh")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("-NoLogo");
-        startInfo.ArgumentList.Add("-NoProfile");
-        startInfo.ArgumentList.Add("-NonInteractive");
-        startInfo.ArgumentList.Add("-Command");
-        startInfo.ArgumentList.Add(
-            "$ErrorActionPreference = 'Stop'; " +
-            "$null = New-Item -ItemType Junction -Path $env:MODKIT_JUNCTION_LINK -Target $env:MODKIT_JUNCTION_TARGET");
-        startInfo.Environment["MODKIT_JUNCTION_LINK"] = linkPath;
-        startInfo.Environment["MODKIT_JUNCTION_TARGET"] = targetPath;
-        using Process process = Process.Start(startInfo) ??
-            throw new InvalidOperationException("Unable to start PowerShell for junction capability probe.");
-        string stdout = process.StandardOutput.ReadToEnd();
-        string stderr = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-        if (process.ExitCode != 0 || !Directory.Exists(linkPath))
-        {
-            Assert.Fail(
-                $"Directory junctions are unavailable: exit={process.ExitCode} stdout={stdout} stderr={stderr}");
-        }
-    }
-
     private static void AssertDirectorySymbolicLinkSupportOrSkip(string directory)
     {
         string target = Path.Combine(directory, $"symlink-probe-target-{Guid.NewGuid():N}");
@@ -669,15 +641,6 @@ public sealed class ArtifactDownloadTests
     private sealed record ZipItem(string Name, string Content, int? ExternalAttributes = null);
 
     private sealed record ProcessResult(int ExitCode, string Stdout, string Stderr);
-
-    public sealed class WindowsFactAttribute : FactAttribute
-    {
-        public WindowsFactAttribute()
-        {
-            if (!OperatingSystem.IsWindows())
-                Skip = "Windows junction coverage runs only on Windows.";
-        }
-    }
 
     private sealed class Fixture : IDisposable
     {
@@ -845,9 +808,30 @@ public sealed class ArtifactDownloadTests
 
         public void Dispose()
         {
-            Server.Dispose();
-            if (Directory.Exists(RootDirectory))
-                Directory.Delete(RootDirectory, recursive: true);
+            Exception? serverFailure = null;
+            try
+            {
+                Server.Dispose();
+            }
+            catch (Exception exception)
+            {
+                serverFailure = exception;
+            }
+
+            try
+            {
+                TestFileSystem.DeleteDirectoryTree(RootDirectory);
+            }
+            catch (Exception cleanupFailure) when (serverFailure is not null)
+            {
+                throw new AggregateException(
+                    "Artifact fixture server shutdown and directory cleanup both failed.",
+                    serverFailure,
+                    cleanupFailure);
+            }
+
+            if (serverFailure is not null)
+                ExceptionDispatchInfo.Capture(serverFailure).Throw();
         }
     }
 
