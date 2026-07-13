@@ -30,14 +30,19 @@ public sealed class RefPackageTests
     public async Task WriterProducesByteIdenticalClosedPackagesFromDifferentRoots()
     {
         using Fixture fixture = new();
-        string firstRoot = fixture.CreateAssemblyRoot("first");
-        string secondRoot = fixture.CreateAssemblyRoot("second", firstRoot);
+        string firstRoot = fixture.CreateAssemblyRoot("first", deterministicMvid: false, timestamp: 0x12345678);
+        string secondRoot = fixture.CreateAssemblyRoot("second", deterministicMvid: false, timestamp: 0x87654321);
+        Assert.All(Assemblies.Keys, name =>
+            Assert.NotEqual(
+                Sha256(Path.Combine(firstRoot, $"{name}.dll")),
+                Sha256(Path.Combine(secondRoot, $"{name}.dll"))));
         string first = fixture.WritePackage(firstRoot, "first-output").AssertSuccess().PackagePath;
         Thread.Sleep(TimeSpan.FromSeconds(1));
         string second = fixture.WritePackage(secondRoot, "second-output").AssertSuccess().PackagePath;
 
         Assert.Equal(Sha256(first), Sha256(second));
         Assert.Equal(File.ReadAllBytes(first), File.ReadAllBytes(second));
+        AssertCanonicalZipEncoding(first);
 
         using FileStream stream = File.OpenRead(first);
         using PackageArchiveReader reader = new(stream);
@@ -67,6 +72,102 @@ public sealed class RefPackageTests
             Assert.Equal(FixedTimestamp, entry.LastWriteTime.DateTime);
             Assert.Equal(0, entry.ExternalAttributes);
         });
+    }
+
+    [Fact]
+    public void VerifierRejectsSemanticallyEquivalentNoncanonicalAssemblyEncoding()
+    {
+        using Fixture fixture = new();
+        string root = fixture.CreateAssemblyRoot("input");
+        string package = fixture.WritePackage(root, "output").AssertSuccess().PackagePath;
+        string replacementPath = Path.Combine(fixture.DirectoryPath, "replacement.dll");
+        WriteAssembly(
+            replacementPath,
+            "Assembly-CSharp",
+            new Version(0, 0, 0, 0),
+            deterministicMvid: false,
+            timestamp: 0x12345678);
+
+        using (ZipArchive archive = ZipFile.Open(package, ZipArchiveMode.Update))
+        {
+            ZipArchiveEntry entry = archive.GetEntry("ref/net6.0/Assembly-CSharp.dll")
+                ?? throw new Xunit.Sdk.XunitException("Reference package is missing Assembly-CSharp.dll.");
+            using Stream stream = entry.Open();
+            stream.SetLength(0);
+            stream.Write(File.ReadAllBytes(replacementPath));
+        }
+
+        fixture.VerifyPackage(package).AssertFailure("assembly encoding is noncanonical");
+    }
+
+    [Fact]
+    public void VerifierRejectsPlatformDependentZipEncoding()
+    {
+        using Fixture fixture = new();
+        string root = fixture.CreateAssemblyRoot("input");
+        string package = fixture.WritePackage(root, "output").AssertSuccess().PackagePath;
+        string replacement = Path.Combine(fixture.DirectoryPath, "platform-zip.nupkg");
+        using (ZipArchive source = ZipFile.OpenRead(package))
+        using (ZipArchive destination = ZipFile.Open(replacement, ZipArchiveMode.Create))
+        {
+            foreach (ZipArchiveEntry sourceEntry in source.Entries)
+            {
+                ZipArchiveEntry destinationEntry = destination.CreateEntry(sourceEntry.FullName, CompressionLevel.Optimal);
+                destinationEntry.LastWriteTime = new DateTimeOffset(FixedTimestamp, TimeSpan.Zero);
+                destinationEntry.ExternalAttributes = 0;
+                using Stream input = sourceEntry.Open();
+                using Stream output = destinationEntry.Open();
+                input.CopyTo(output);
+            }
+        }
+        File.Move(replacement, package, overwrite: true);
+
+        fixture.VerifyPackage(package).AssertFailure("ZIP encoding is noncanonical");
+    }
+
+    [Fact]
+    public void WriterCanonicalizesPortablePdbDebugIdentityFromDifferentBuildRoots()
+    {
+        using Fixture fixture = new();
+        string firstRoot = fixture.CreateAssemblyRoot("first");
+        string secondRoot = fixture.CreateAssemblyRoot("second", firstRoot);
+        fixture.BuildPortableDebugAssembly("debug-build-first", Path.Combine(firstRoot, "Assembly-CSharp.dll"));
+        fixture.BuildPortableDebugAssembly("debug-build-second", Path.Combine(secondRoot, "Assembly-CSharp.dll"));
+        Assert.NotEqual(
+            Sha256(Path.Combine(firstRoot, "Assembly-CSharp.dll")),
+            Sha256(Path.Combine(secondRoot, "Assembly-CSharp.dll")));
+
+        string first = fixture.WritePackage(firstRoot, "first-output").AssertSuccess().PackagePath;
+        string second = fixture.WritePackage(secondRoot, "second-output").AssertSuccess().PackagePath;
+
+        Assert.Equal(Sha256(first), Sha256(second));
+        Assert.Equal(File.ReadAllBytes(first), File.ReadAllBytes(second));
+    }
+
+    [Fact]
+    public void CanonicalZipWriterRejectsZip64SentinelEntryCount()
+    {
+        SortedDictionary<string, byte[]> entries = new(StringComparer.Ordinal);
+        for (int index = 0; index < ushort.MaxValue; index++)
+            entries.Add(index.ToString("D5", System.Globalization.CultureInfo.InvariantCulture), []);
+        string toolAssembly = Path.Combine(
+            Root,
+            "tools",
+            "FarmTogether2.ModKit.Tool",
+            "bin",
+            TestBuildConfiguration.Current,
+            "net8.0",
+            "FarmTogether2.ModKit.Tool.dll");
+        System.Reflection.Assembly tool = System.Reflection.Assembly.LoadFrom(toolAssembly);
+        Type writer = tool.GetType("FarmTogether2.ModKit.Tool.CanonicalZipWriter", throwOnError: true)!;
+        System.Reflection.MethodInfo method = Assert.Single(writer.GetMethods(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static),
+            candidate => candidate.Name == "Write" && candidate.GetParameters().Length == 1);
+
+        System.Reflection.TargetInvocationException exception = Assert.Throws<System.Reflection.TargetInvocationException>(
+            () => method.Invoke(null, [entries]));
+        InvalidDataException failure = Assert.IsType<InvalidDataException>(exception.InnerException);
+        Assert.Contains("too many entries", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -170,6 +271,10 @@ public sealed class RefPackageTests
     [InlineData("wrong-version")]
     [InlineData("public-key")]
     [InlineData("culture")]
+    [InlineData("retargetable")]
+    [InlineData("windows-runtime")]
+    [InlineData("hash-algorithm")]
+    [InlineData("console-module")]
     public void VerifierRejectsTamperedAssemblyIdentity(string mutation)
     {
         using Fixture fixture = new();
@@ -188,7 +293,17 @@ public sealed class RefPackageTests
                 mutation == "wrong-name" ? "Wrong-Assembly" : "Assembly-CSharp",
                 mutation == "wrong-version" ? new Version(1, 0, 0, 0) : new Version(0, 0, 0, 0),
                 publicKey: mutation == "public-key" ? [1, 2, 3, 4] : null,
-                culture: mutation == "culture" ? "fr-FR" : null);
+                culture: mutation == "culture" ? "fr-FR" : null,
+                attributes: mutation switch
+                {
+                    "retargetable" => AssemblyAttributes.Retargetable,
+                    "windows-runtime" => AssemblyAttributes.WindowsRuntime,
+                    _ => (AssemblyAttributes)0
+                },
+                hashAlgorithm: mutation == "hash-algorithm"
+                    ? Mono.Cecil.AssemblyHashAlgorithm.MD5
+                    : Mono.Cecil.AssemblyHashAlgorithm.SHA1,
+                moduleKind: mutation == "console-module" ? ModuleKind.Console : ModuleKind.Dll);
             replacement = File.ReadAllBytes(replacementPath);
         }
 
@@ -247,17 +362,91 @@ public sealed class RefPackageTests
         string name,
         Version version,
         byte[]? publicKey = null,
-        string? culture = null)
+        string? culture = null,
+        bool deterministicMvid = true,
+        uint timestamp = 0,
+        AssemblyAttributes attributes = (AssemblyAttributes)0,
+        Mono.Cecil.AssemblyHashAlgorithm hashAlgorithm = Mono.Cecil.AssemblyHashAlgorithm.SHA1,
+        ModuleKind moduleKind = ModuleKind.Dll)
     {
         AssemblyNameDefinition identity = new(name, version);
         identity.Culture = culture;
+        identity.Attributes |= attributes;
+        identity.HashAlgorithm = hashAlgorithm;
         if (publicKey is not null)
         {
             identity.PublicKey = publicKey;
             identity.Attributes |= AssemblyAttributes.PublicKey;
         }
-        using AssemblyDefinition assembly = AssemblyDefinition.CreateAssembly(identity, name, ModuleKind.Dll);
-        assembly.Write(path, new WriterParameters { DeterministicMvid = true });
+        using AssemblyDefinition assembly = AssemblyDefinition.CreateAssembly(identity, name, moduleKind);
+        assembly.Write(path, new WriterParameters { DeterministicMvid = deterministicMvid, Timestamp = timestamp });
+    }
+
+    private static void AssertCanonicalZipEncoding(string path)
+    {
+        const uint localHeaderSignature = 0x04034b50;
+        const uint centralHeaderSignature = 0x02014b50;
+        const uint endSignature = 0x06054b50;
+        const ushort version20 = 20;
+        const ushort utf8Flag = 1 << 11;
+        const ushort fixedDosDate = ((2000 - 1980) << 9) | (1 << 5) | 1;
+
+        using FileStream stream = File.OpenRead(path);
+        using BinaryReader reader = new(stream, System.Text.Encoding.UTF8, leaveOpen: false);
+        Assert.True(stream.Length >= 22);
+        stream.Position = stream.Length - 22;
+        Assert.Equal(endSignature, reader.ReadUInt32());
+        Assert.Equal((ushort)0, reader.ReadUInt16());
+        Assert.Equal((ushort)0, reader.ReadUInt16());
+        ushort entriesOnDisk = reader.ReadUInt16();
+        ushort totalEntries = reader.ReadUInt16();
+        Assert.Equal(entriesOnDisk, totalEntries);
+        uint centralLength = reader.ReadUInt32();
+        uint centralOffset = reader.ReadUInt32();
+        Assert.Equal((ushort)0, reader.ReadUInt16());
+        Assert.Equal(stream.Length - 22, centralOffset + centralLength);
+
+        stream.Position = centralOffset;
+        for (int index = 0; index < totalEntries; index++)
+        {
+            Assert.Equal(centralHeaderSignature, reader.ReadUInt32());
+            Assert.Equal(version20, reader.ReadUInt16());
+            Assert.Equal(version20, reader.ReadUInt16());
+            Assert.Equal(utf8Flag, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal(fixedDosDate, reader.ReadUInt16());
+            uint crc32 = reader.ReadUInt32();
+            uint compressedSize = reader.ReadUInt32();
+            Assert.Equal(compressedSize, reader.ReadUInt32());
+            ushort nameLength = reader.ReadUInt16();
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal(0u, reader.ReadUInt32());
+            uint localOffset = reader.ReadUInt32();
+            byte[] name = reader.ReadBytes(nameLength);
+            if (System.Text.Encoding.UTF8.GetString(name) == "FarmTogether2.GameApi.Ref.nuspec")
+                Assert.Equal(0x75d28247u, crc32);
+            long nextCentralHeader = stream.Position;
+
+            stream.Position = localOffset;
+            Assert.Equal(localHeaderSignature, reader.ReadUInt32());
+            Assert.Equal(version20, reader.ReadUInt16());
+            Assert.Equal(utf8Flag, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal(fixedDosDate, reader.ReadUInt16());
+            Assert.Equal(crc32, reader.ReadUInt32());
+            Assert.Equal(compressedSize, reader.ReadUInt32());
+            Assert.Equal(compressedSize, reader.ReadUInt32());
+            Assert.Equal(nameLength, reader.ReadUInt16());
+            Assert.Equal((ushort)0, reader.ReadUInt16());
+            Assert.Equal(name, reader.ReadBytes(nameLength));
+            stream.Position = nextCentralHeader;
+        }
+        Assert.Equal(centralOffset + centralLength, stream.Position);
     }
 
     private static string Sha256(string path)
@@ -276,7 +465,11 @@ public sealed class RefPackageTests
 
         public string DirectoryPath { get; }
 
-        public string CreateAssemblyRoot(string name, string? copyFrom = null)
+        public string CreateAssemblyRoot(
+            string name,
+            string? copyFrom = null,
+            bool deterministicMvid = true,
+            uint timestamp = 0)
         {
             string root = Path.Combine(DirectoryPath, name);
             Directory.CreateDirectory(root);
@@ -284,7 +477,12 @@ public sealed class RefPackageTests
             {
                 string destination = Path.Combine(root, $"{assemblyName}.dll");
                 if (copyFrom is null)
-                    WriteAssembly(destination, assemblyName, version);
+                    WriteAssembly(
+                        destination,
+                        assemblyName,
+                        version,
+                        deterministicMvid: deterministicMvid,
+                        timestamp: timestamp);
                 else
                     File.Copy(Path.Combine(copyFrom, $"{assemblyName}.dll"), destination);
             }
@@ -326,6 +524,40 @@ public sealed class RefPackageTests
             string stderr = process.StandardError.ReadToEnd();
             process.WaitForExit();
             return new PackageResult(package, process.ExitCode, stdout, stderr);
+        }
+
+        public void BuildPortableDebugAssembly(string name, string destination)
+        {
+            string projectRoot = Path.Combine(DirectoryPath, name);
+            Directory.CreateDirectory(projectRoot);
+            string project = Path.Combine(projectRoot, "Assembly-CSharp.csproj");
+            File.WriteAllText(
+                project,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net6.0</TargetFramework>
+                    <AssemblyName>Assembly-CSharp</AssemblyName>
+                    <AssemblyVersion>0.0.0.0</AssemblyVersion>
+                    <DebugType>portable</DebugType>
+                    <DebugSymbols>true</DebugSymbols>
+                    <Deterministic>true</Deterministic>
+                    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+                    <NuGetAudit>false</NuGetAudit>
+                  </PropertyGroup>
+                </Project>
+                """.Replace("\r\n", "\n", StringComparison.Ordinal) + "\n",
+                new System.Text.UTF8Encoding(false));
+            File.WriteAllText(
+                Path.Combine(projectRoot, "Probe.cs"),
+                "public sealed class Probe { public int Value => 42; }\n",
+                new System.Text.UTF8Encoding(false));
+            RunDotNet(["build", project, "-c", "Release", "-warnaserror"]).AssertSuccess();
+            string assembly = Path.Combine(projectRoot, "bin", "Release", "net6.0", "Assembly-CSharp.dll");
+            string symbols = Path.Combine(projectRoot, "bin", "Release", "net6.0", "Assembly-CSharp.pdb");
+            Assert.True(File.Exists(assembly));
+            Assert.True(File.Exists(symbols));
+            File.Copy(assembly, destination, overwrite: true);
         }
 
         public ProcessResult VerifyPackage(string package)

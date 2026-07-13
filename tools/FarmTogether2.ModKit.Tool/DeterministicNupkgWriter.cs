@@ -4,6 +4,7 @@ using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
+using Mono.Cecil;
 using NuGet.Packaging;
 
 namespace FarmTogether2.ModKit.Tool;
@@ -51,17 +52,7 @@ internal static class DeterministicNupkgWriter
         {
             using (FileStream stream = new(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
             {
-                using (ZipArchive archive = new(stream, ZipArchiveMode.Create, leaveOpen: true, Encoding.UTF8))
-                {
-                    foreach ((string path, byte[] bytes) in entries)
-                    {
-                        ZipArchiveEntry entry = archive.CreateEntry(path, CompressionLevel.Optimal);
-                        entry.LastWriteTime = FixedTimestamp;
-                        entry.ExternalAttributes = 0;
-                        using Stream target = entry.Open();
-                        target.Write(bytes);
-                    }
-                }
+                CanonicalZipWriter.Write(stream, entries);
                 stream.Flush(flushToDisk: true);
             }
             VerifyPackage(temporary, packageId, version);
@@ -113,6 +104,8 @@ internal static class DeterministicNupkgWriter
                 throw new InvalidDataException($"Stub assembly identity is noncanonical: {path}");
             }
             byte[] bytes = File.ReadAllBytes(path);
+            AssemblyIdentity sourceIdentity = ReadAssemblyIdentity(bytes, path);
+            EnsureCanonicalAssemblyIdentity(sourceIdentity, name, expectedVersion, path);
             SafePath.AssertRegularFile(path, "Stub assembly");
             AssemblyName identityAfterRead = AssemblyName.GetAssemblyName(path);
             using FileStream verificationStream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -122,7 +115,11 @@ internal static class DeterministicNupkgWriter
             {
                 throw new IOException($"Stub assembly changed while it was read: {path}");
             }
-            result.Add(name, bytes);
+            byte[] canonicalBytes = CanonicalizeAssembly(bytes, path);
+            AssemblyIdentity canonicalIdentity = ReadAssemblyIdentity(canonicalBytes, path);
+            if (canonicalIdentity != sourceIdentity)
+                throw new InvalidDataException($"Stub assembly identity changed during canonicalization: {path}");
+            result.Add(name, canonicalBytes);
         }
         if (!result.Keys.SequenceEqual(ExpectedAssemblies.Keys.Order(StringComparer.Ordinal), StringComparer.Ordinal))
             throw new InvalidDataException("Stub assembly allowlist is incomplete.");
@@ -152,34 +149,38 @@ internal static class DeterministicNupkgWriter
 
     private static void VerifyPackage(string path, string packageId, string version)
     {
-        byte[] packageHashBeforeRead = HashFile(path);
-        using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using PackageArchiveReader reader = new(stream, leaveStreamOpen: false);
-        if (reader.IsSignedAsync(CancellationToken.None).GetAwaiter().GetResult())
-            throw new InvalidDataException("Reference package must not be signed.");
-        NuGet.Packaging.Core.PackageIdentity identity = reader.GetIdentity();
-        if (identity.Id != packageId || identity.Version.ToNormalizedString() != version)
-            throw new InvalidDataException("Reference package identity mismatch.");
-        string[] files = reader.GetFiles().Order(StringComparer.Ordinal).ToArray();
-        string[] referenceFiles = files.Where(file => file.StartsWith($"ref/{TargetFramework}/", StringComparison.Ordinal)).ToArray();
-        string[] expected = ExpectedAssemblies.Keys
-            .Select(name => $"ref/{TargetFramework}/{name}.dll")
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        if (!referenceFiles.SequenceEqual(expected, StringComparer.Ordinal))
-            throw new InvalidDataException("Reference package does not contain the closed seven-DLL boundary.");
-        if (files.Any(file =>
-                file.StartsWith("lib/", StringComparison.Ordinal) ||
-                file.StartsWith("runtimes/", StringComparison.Ordinal) ||
-                file.StartsWith("tools/", StringComparison.Ordinal) ||
-                file.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) ||
-                (file.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) &&
-                 file != "[Content_Types].xml")))
+        byte[] packageBytes = File.ReadAllBytes(path);
+        byte[] packageHash = SHA256.HashData(packageBytes);
+        using (MemoryStream packageStream = new(packageBytes, writable: false))
+        using (PackageArchiveReader reader = new(packageStream, leaveStreamOpen: false))
         {
-            throw new InvalidDataException("Reference package contains a forbidden asset path.");
+            if (reader.IsSignedAsync(CancellationToken.None).GetAwaiter().GetResult())
+                throw new InvalidDataException("Reference package must not be signed.");
+            NuGet.Packaging.Core.PackageIdentity identity = reader.GetIdentity();
+            if (identity.Id != packageId || identity.Version.ToNormalizedString() != version)
+                throw new InvalidDataException("Reference package identity mismatch.");
+            string[] files = reader.GetFiles().Order(StringComparer.Ordinal).ToArray();
+            string[] referenceFiles = files.Where(file => file.StartsWith($"ref/{TargetFramework}/", StringComparison.Ordinal)).ToArray();
+            string[] expected = ExpectedAssemblies.Keys
+                .Select(name => $"ref/{TargetFramework}/{name}.dll")
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            if (!referenceFiles.SequenceEqual(expected, StringComparer.Ordinal))
+                throw new InvalidDataException("Reference package does not contain the closed seven-DLL boundary.");
+            if (files.Any(file =>
+                    file.StartsWith("lib/", StringComparison.Ordinal) ||
+                    file.StartsWith("runtimes/", StringComparison.Ordinal) ||
+                    file.StartsWith("tools/", StringComparison.Ordinal) ||
+                    file.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) ||
+                    (file.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) &&
+                     file != "[Content_Types].xml")))
+            {
+                throw new InvalidDataException("Reference package contains a forbidden asset path.");
+            }
         }
 
-        using ZipArchive archive = new(File.OpenRead(path), ZipArchiveMode.Read, leaveOpen: false, Encoding.UTF8);
+        using MemoryStream zipStream = new(packageBytes, writable: false);
+        using ZipArchive archive = new(zipStream, ZipArchiveMode.Read, leaveOpen: false, Encoding.UTF8);
         string[] entryNames = archive.Entries.Select(entry => entry.FullName).ToArray();
         string coreName = LowerSha256($"{packageId}\n{version}\ncore-properties")[..32];
         string[] expectedEntries =
@@ -206,18 +207,23 @@ internal static class DeterministicNupkgWriter
         if (entryNames.Distinct(StringComparer.Ordinal).Count() != entryNames.Length ||
             entryNames.Any(IsUnsafePackagePath))
             throw new InvalidDataException("Reference package contains duplicate or unsafe paths.");
+        SortedDictionary<string, byte[]> packagedAssemblies = new(StringComparer.Ordinal);
         foreach ((string name, Version expectedVersion) in ExpectedAssemblies)
         {
             string entryPath = $"ref/{TargetFramework}/{name}.dll";
             ZipArchiveEntry entry = archive.GetEntry(entryPath)
                 ?? throw new InvalidDataException($"Reference package assembly is missing: {entryPath}");
-            VerifyAssemblyEntry(entry, name, expectedVersion);
+            packagedAssemblies.Add(name, VerifyAssemblyEntry(entry, name, expectedVersion));
         }
-        if (!packageHashBeforeRead.SequenceEqual(HashFile(path)))
+        byte[] canonicalPackage = CanonicalZipWriter.Write(BuildEntries(packageId, version, packagedAssemblies));
+        if (!packageBytes.SequenceEqual(canonicalPackage))
+            throw new InvalidDataException("Reference package ZIP encoding is noncanonical.");
+        SafePath.AssertRegularFile(path, "Reference package");
+        if (!packageHash.SequenceEqual(HashFile(path)))
             throw new IOException("Reference package changed while it was read.");
     }
 
-    private static void VerifyAssemblyEntry(ZipArchiveEntry entry, string expectedName, Version expectedVersion)
+    private static byte[] VerifyAssemblyEntry(ZipArchiveEntry entry, string expectedName, Version expectedVersion)
     {
         byte[] firstBytes = ReadEntryBytes(entry);
         AssemblyIdentity firstIdentity = ReadAssemblyIdentity(firstBytes, entry.FullName);
@@ -225,11 +231,41 @@ internal static class DeterministicNupkgWriter
         AssemblyIdentity secondIdentity = ReadAssemblyIdentity(secondBytes, entry.FullName);
         if (!firstBytes.SequenceEqual(secondBytes) || firstIdentity != secondIdentity)
             throw new IOException($"Reference package assembly changed while it was read: {entry.FullName}");
-        if (firstIdentity.Name != expectedName || firstIdentity.Version != expectedVersion ||
-            firstIdentity.HasPublicKey || !string.IsNullOrEmpty(firstIdentity.Culture))
+        EnsureCanonicalAssemblyIdentity(firstIdentity, expectedName, expectedVersion, entry.FullName);
+        if (!firstBytes.SequenceEqual(CanonicalizeAssembly(firstBytes, entry.FullName)))
+            throw new InvalidDataException($"Reference package assembly encoding is noncanonical: {entry.FullName}");
+        return firstBytes;
+    }
+
+    private static byte[] CanonicalizeAssembly(byte[] bytes, string label)
+    {
+        try
         {
-            throw new InvalidDataException(
-                $"Reference package assembly identity is noncanonical: {entry.FullName}");
+            using MemoryStream source = new(bytes, writable: false);
+            using Mono.Cecil.AssemblyDefinition assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(
+                source,
+                new ReaderParameters
+                {
+                    InMemory = true,
+                    ReadSymbols = false,
+                    ReadingMode = ReadingMode.Immediate
+                });
+            if (assembly.Modules.Count != 1)
+                throw new InvalidDataException($"Reference assembly must contain exactly one module: {label}");
+            using MemoryStream destination = new();
+            assembly.Write(
+                destination,
+                new WriterParameters
+                {
+                    DeterministicMvid = true,
+                    Timestamp = 0,
+                    WriteSymbols = false
+                });
+            return destination.ToArray();
+        }
+        catch (BadImageFormatException exception)
+        {
+            throw new InvalidDataException($"Reference package assembly is invalid: {label}", exception);
         }
     }
 
@@ -252,7 +288,9 @@ internal static class DeterministicNupkgWriter
             MetadataReader metadata = peReader.GetMetadataReader();
             if (!metadata.IsAssembly)
                 throw new BadImageFormatException("The PE image is not an assembly.");
-            AssemblyDefinition definition = metadata.GetAssemblyDefinition();
+            CorHeader corHeader = peReader.PEHeaders.CorHeader
+                ?? throw new BadImageFormatException("The PE image has no CLR header.");
+            System.Reflection.Metadata.AssemblyDefinition definition = metadata.GetAssemblyDefinition();
             string culture = definition.Culture.IsNil ? string.Empty : metadata.GetString(definition.Culture);
             bool hasPublicKey = !definition.PublicKey.IsNil && metadata.GetBlobBytes(definition.PublicKey).Length != 0;
             hasPublicKey |= (definition.Flags & AssemblyFlags.PublicKey) != 0;
@@ -260,11 +298,35 @@ internal static class DeterministicNupkgWriter
                 metadata.GetString(definition.Name),
                 definition.Version,
                 culture,
-                hasPublicKey);
+                hasPublicKey,
+                definition.Flags,
+                definition.HashAlgorithm,
+                peReader.PEHeaders.CoffHeader.Machine,
+                (peReader.PEHeaders.CoffHeader.Characteristics & Characteristics.Dll) != 0,
+                corHeader.Flags,
+                corHeader.EntryPointTokenOrRelativeVirtualAddress);
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
             throw new InvalidDataException($"Reference package assembly is invalid: {label}", exception);
+        }
+    }
+
+    private static void EnsureCanonicalAssemblyIdentity(
+        AssemblyIdentity identity,
+        string expectedName,
+        Version expectedVersion,
+        string label)
+    {
+        if (identity.Name != expectedName || identity.Version != expectedVersion ||
+            identity.HasPublicKey || !string.IsNullOrEmpty(identity.Culture) ||
+            identity.Flags != (AssemblyFlags)0 ||
+            identity.HashAlgorithm != System.Reflection.AssemblyHashAlgorithm.Sha1 ||
+            identity.Machine != Machine.I386 ||
+            !identity.IsDll ||
+            identity.CorFlags != CorFlags.ILOnly || identity.ManagedEntryPoint != 0)
+        {
+            throw new InvalidDataException($"Reference package assembly identity is noncanonical: {label}");
         }
     }
 
@@ -331,5 +393,11 @@ internal static class DeterministicNupkgWriter
         string Name,
         Version Version,
         string Culture,
-        bool HasPublicKey);
+        bool HasPublicKey,
+        AssemblyFlags Flags,
+        System.Reflection.AssemblyHashAlgorithm HashAlgorithm,
+        Machine Machine,
+        bool IsDll,
+        CorFlags CorFlags,
+        int ManagedEntryPoint);
 }

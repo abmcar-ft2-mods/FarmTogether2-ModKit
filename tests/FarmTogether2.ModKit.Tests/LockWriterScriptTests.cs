@@ -289,8 +289,12 @@ public sealed class LockWriterScriptTests
             foreach ((string name, Version version) in Assemblies)
             {
                 string path = Path.Combine(assemblyRoot, $"{name}.dll");
+                AssemblyNameDefinition identity = new(name, version)
+                {
+                    HashAlgorithm = Mono.Cecil.AssemblyHashAlgorithm.SHA1
+                };
                 using AssemblyDefinition assembly = AssemblyDefinition.CreateAssembly(
-                    new AssemblyNameDefinition(name, version), name, ModuleKind.Dll);
+                    identity, name, ModuleKind.Dll);
                 assembly.Write(path, new WriterParameters { DeterministicMvid = true });
                 arguments.Add("--assembly");
                 arguments.Add(path);

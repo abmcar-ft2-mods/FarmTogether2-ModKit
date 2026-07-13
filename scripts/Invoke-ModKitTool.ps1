@@ -117,6 +117,7 @@ if ($headType.Count -ne 1 -or $headType[0].Trim() -cne 'commit') { throw 'ModKit
 $rootInputs = @('Directory.Build.props','Directory.Packages.props','NuGet.config','global.json')
 $toolInputs = @(
     'CandidateVerifier.cs',
+    'CanonicalZipWriter.cs',
     'DeterministicNupkgWriter.cs',
     'FarmTogether2.ModKit.Tool.csproj',
     'LockFileResolver.cs',

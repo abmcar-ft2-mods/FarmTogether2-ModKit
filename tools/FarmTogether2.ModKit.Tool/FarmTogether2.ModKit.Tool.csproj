@@ -5,6 +5,7 @@
     <AssemblyName>FarmTogether2.ModKit.Tool</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Mono.Cecil" />
     <PackageReference Include="NuGet.Packaging" />
   </ItemGroup>
 </Project>
