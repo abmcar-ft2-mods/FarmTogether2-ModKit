@@ -66,6 +66,36 @@ public sealed class InvokeModBuildTests
         Assert.False(File.Exists(fixture.DotNetLog));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData(" Fixture ")]
+    public void TrustedConfigVerificationRejectsBlankOrUntrimmedDisplayNameBeforeBuild(string displayName)
+    {
+        using Fixture fixture = new();
+        fixture.ReplaceConfigValue("\"displayName\": \"Fixture\"", $"\"displayName\": \"{displayName}\"");
+
+        fixture.Run("Hosted").AssertFailure("displayName");
+
+        fixture.AssertTrustedToolRunsAfterGitValidation();
+        Assert.False(File.Exists(fixture.DotNetLog));
+        Assert.False(File.Exists(fixture.GuardLog));
+    }
+
+    [Fact]
+    public void TrustedConfigVerificationRejectsUnsafeInstallReadmeBeforeBuild()
+    {
+        using Fixture fixture = new();
+        fixture.ReplaceConfigValue(
+            "\"installReadme\": \"packaging/README_安装说明.txt\"",
+            "\"installReadme\": \"../outside.txt\"");
+
+        fixture.Run("Hosted").AssertFailure("installReadme");
+
+        fixture.AssertTrustedToolRunsAfterGitValidation();
+        Assert.False(File.Exists(fixture.DotNetLog));
+        Assert.False(File.Exists(fixture.GuardLog));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _shimDirectory;
@@ -79,6 +109,7 @@ public sealed class InvokeModBuildTests
             InteropDirectory = Path.Combine(GameDirectory, "BepInEx", "interop");
             DotNetLog = Path.Combine(DirectoryPath, "dotnet.log");
             GuardLog = Path.Combine(DirectoryPath, "guard.log");
+            SequenceLog = Path.Combine(DirectoryPath, "sequence.log");
             BuiltPlugin = Path.Combine(Repository, "src", "bin", "Fixture.dll");
             Directory.CreateDirectory(Path.Combine(Repository, "src"));
             Directory.CreateDirectory(Path.Combine(Repository, "tests"));
@@ -130,7 +161,27 @@ public sealed class InvokeModBuildTests
         public string InteropDirectory { get; }
         public string DotNetLog { get; }
         public string GuardLog { get; }
+        public string SequenceLog { get; }
         public string BuiltPlugin { get; }
+
+        public void ReplaceConfigValue(string oldValue, string newValue)
+        {
+            string path = Path.Combine(Repository, "mod.json");
+            string original = File.ReadAllText(path);
+            string updated = original.Replace(oldValue, newValue, StringComparison.Ordinal);
+            Assert.NotEqual(original, updated);
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+        }
+
+        public void AssertTrustedToolRunsAfterGitValidation()
+        {
+            string[] sequence = File.ReadAllLines(SequenceLog);
+            int head = Array.FindIndex(sequence, line => line.Contains("rev-parse HEAD", StringComparison.Ordinal) && !line.Contains("--abbrev-ref", StringComparison.Ordinal));
+            int detached = Array.FindIndex(sequence, line => line.Contains("rev-parse --abbrev-ref HEAD", StringComparison.Ordinal));
+            int clean = Array.FindIndex(sequence, line => line.Contains("status --porcelain --untracked-files=all", StringComparison.Ordinal));
+            int tool = Array.FindIndex(sequence, line => line.StartsWith("tool mod-config verify --file ", StringComparison.Ordinal));
+            Assert.True(head >= 0 && detached > head && clean > detached && tool > clean, string.Join("\n", sequence));
+        }
 
         public ProcessResult Run(
             string mode,
@@ -167,6 +218,7 @@ public sealed class InvokeModBuildTests
             startInfo.Environment["FAKE_GIT_HEAD"] = fakeHead;
             startInfo.Environment["FAKE_GUARD_LOG"] = GuardLog;
             startInfo.Environment["FAKE_PLUGIN_DLL"] = BuiltPlugin;
+            startInfo.Environment["FAKE_SEQUENCE_LOG"] = SequenceLog;
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh.");
             string stdout = process.StandardOutput.ReadToEnd();
             string stderr = process.StandardError.ReadToEnd();
@@ -186,6 +238,7 @@ public sealed class InvokeModBuildTests
                 """.Replace("\r\n", "\n", StringComparison.Ordinal), new UTF8Encoding(false));
             string gitScript = Path.Combine(_shimDirectory, "git-shim.ps1");
             File.WriteAllText(gitScript, """
+                Add-Content -LiteralPath $env:FAKE_SEQUENCE_LOG -Value ("git " + ($args -join ' '))
                 if ($args -contains 'rev-parse' -and $args -contains '--abbrev-ref') { 'HEAD'; exit 0 }
                 if ($args -contains 'rev-parse') { $env:FAKE_GIT_HEAD; exit 0 }
                 if ($args -contains 'status') { exit 0 }
@@ -193,6 +246,21 @@ public sealed class InvokeModBuildTests
                 """.Replace("\r\n", "\n", StringComparison.Ordinal), new UTF8Encoding(false));
             WriteWrapper("dotnet", dotnetScript);
             WriteWrapper("git", gitScript);
+            string runnerDirectory = Path.Combine(Repository, ".modkit", "tooling", "scripts");
+            Directory.CreateDirectory(runnerDirectory);
+            File.WriteAllText(Path.Combine(runnerDirectory, "Invoke-ModKitTool.ps1"), """
+                #requires -Version 7.0
+                param([Parameter(ValueFromRemainingArguments)][string[]]$ToolArguments)
+                Add-Content -LiteralPath $env:FAKE_SEQUENCE_LOG -Value ("tool " + ($ToolArguments -join ' '))
+                if ($ToolArguments.Count -ne 4 -or $ToolArguments[0] -cne 'mod-config' -or $ToolArguments[1] -cne 'verify' -or $ToolArguments[2] -cne '--file') { throw 'Unexpected trusted tool arguments.' }
+                $config = Get-Content -LiteralPath $ToolArguments[3] -Raw | ConvertFrom-Json
+                if ([string]::IsNullOrWhiteSpace($config.displayName) -or $config.displayName -cne $config.displayName.Trim()) { throw 'Mod displayName must be non-empty canonical text.' }
+                $readme = [string]$config.installReadme
+                if ([string]::IsNullOrWhiteSpace($readme) -or $readme -cne $readme.Trim() -or
+                    $readme.Contains('\') -or $readme.Contains(':') -or $readme.StartsWith('/') -or
+                    @($readme.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0 -or
+                    -not $readme.EndsWith('.txt', [StringComparison]::OrdinalIgnoreCase)) { throw 'Mod installReadme contains an unsafe or noncanonical relative path.' }
+                """.Replace("\r\n", "\n", StringComparison.Ordinal), new UTF8Encoding(false));
         }
 
         private void WriteWrapper(string name, string scriptPath)

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -88,6 +89,27 @@ public sealed class ModPackagerTests
         string line = File.ReadAllLines(fixture.Checksums)[0];
         File.AppendAllText(fixture.Checksums, line + "\n", new UTF8Encoding(false));
         fixture.Verify().AssertFailure("checksum");
+    }
+
+    [Fact]
+    public void VerifierRejectsCorruptCompressedPayloadEvenWhenOuterChecksumIsUpdated()
+    {
+        using Fixture fixture = new();
+        fixture.Write().AssertSuccess();
+        byte[] archive = File.ReadAllBytes(fixture.PlayerZip);
+        Assert.Equal(0x04034b50u, BinaryPrimitives.ReadUInt32LittleEndian(archive));
+        ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(6));
+        Assert.Equal(0, flags & 0x0008);
+        int compressedLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(archive.AsSpan(18)));
+        int nameLength = BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(26));
+        int extraLength = BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(28));
+        int payloadOffset = checked(30 + nameLength + extraLength);
+        Assert.True(compressedLength > 4);
+        archive[payloadOffset + (compressedLength / 2)] ^= 0x5a;
+        File.WriteAllBytes(fixture.PlayerZip, archive);
+        fixture.UpdatePlayerChecksum();
+
+        fixture.Verify().AssertFailure("payload");
     }
 
     private static void AssertPackageLayout(string output)
@@ -197,6 +219,17 @@ public sealed class ModPackagerTests
                 path => Path.GetFileName(path)!,
                 path => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant(),
                 StringComparer.Ordinal);
+
+        public void UpdatePlayerChecksum()
+        {
+            string playerName = Path.GetFileName(PlayerZip);
+            string playerHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(PlayerZip))).ToLowerInvariant();
+            string[] lines = File.ReadAllLines(Checksums);
+            int index = Array.FindIndex(lines, line => line.EndsWith("  " + playerName, StringComparison.Ordinal));
+            Assert.True(index >= 0);
+            lines[index] = $"{playerHash}  {playerName}";
+            File.WriteAllText(Checksums, string.Join('\n', lines) + "\n", new UTF8Encoding(false));
+        }
 
         private static ProcessResult Run(IEnumerable<string> toolArguments)
         {

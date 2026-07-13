@@ -107,7 +107,7 @@ function Read-StringArray([Collections.Generic.Dictionary[string, Text.Json.Json
     return ,$values.ToArray()
 }
 
-function Read-ClosedModConfig([string]$Path) {
+function Read-VerifiedModConfig([string]$Path) {
     Assert-RegularFile $Path 'mod.json'
     $document = [Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($Path))
     try {
@@ -124,9 +124,6 @@ function Read-ClosedModConfig([string]$Path) {
         foreach ($field in 'installReadme','supportedSteamBuild') { $result[$field] = Read-String $properties $field 'mod.json' }
         $config = [pscustomobject]$result
     } finally { $document.Dispose() }
-    if ($config.id -cnotmatch '^[a-z0-9]+(?:[.-][a-z0-9]+)+$' -or $config.assemblyName -cnotmatch '^[A-Za-z_][A-Za-z0-9_.]*$' -or
-        $config.version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
-        $config.supportedSteamBuild -cnotmatch '^[1-9][0-9]*$') { throw 'mod.json identity is noncanonical.' }
     return $config
 }
 
@@ -171,11 +168,6 @@ if ($gameProvided) {
 }
 
 $lock = Read-ClosedLock (Join-Path $root 'modkit.lock.json')
-$config = Read-ClosedModConfig (Join-Path $root 'mod.json')
-$pluginProject = Resolve-DeclaredFile $root $config.project '.csproj' 'Plugin project'
-$testProjects = @($config.testProjects | ForEach-Object { Resolve-DeclaredFile $root $_ '.csproj' 'Test project' })
-$guards = @($config.guardScripts | ForEach-Object { Resolve-DeclaredFile $root $_ '.ps1' 'Guard script' })
-if ($testProjects -contains $pluginProject) { throw 'mod.json project must not also appear in testProjects.' }
 $tooling = Join-Path $root '.modkit/tooling'
 Assert-DirectoryTree $tooling 'Locked ModKit tooling'
 $packageDirectory = Join-Path $root '.modkit/packages'
@@ -188,9 +180,6 @@ Assert-RegularFile $packageEntries[0].FullName 'Locked ModKit package'
 if ((Get-FileHash -LiteralPath $packageEntries[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $lock.sha256) {
     throw 'Locked ModKit package SHA-256 differs from modkit.lock.json.'
 }
-if ($DeployToGame) {
-    Assert-NoReparseAncestor (Join-Path $resolvedGame "BepInEx/plugins/$($config.assemblyName)") 'Plugin deployment directory'
-}
 
 $head = @(& git -C $tooling rev-parse HEAD)
 if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $lock.workflowCommit) { throw 'Locked ModKit tooling HEAD differs from modkit.lock.json.' }
@@ -198,6 +187,20 @@ $branch = @(& git -C $tooling rev-parse --abbrev-ref HEAD)
 if ($LASTEXITCODE -ne 0 -or $branch.Count -ne 1 -or $branch[0].Trim() -cne 'HEAD') { throw 'Locked ModKit tooling must be detached.' }
 $status = @(& git -C $tooling status --porcelain --untracked-files=all)
 if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { throw 'Locked ModKit tooling checkout is dirty.' }
+
+$modConfig = Join-Path $root 'mod.json'
+$toolRunner = Join-Path $tooling 'scripts/Invoke-ModKitTool.ps1'
+Assert-RegularFile $toolRunner 'Locked ModKit tool runner'
+& $toolRunner @('mod-config','verify','--file',$modConfig)
+if ($LASTEXITCODE -ne 0) { throw "Trusted mod.json verification failed with exit code $LASTEXITCODE." }
+$config = Read-VerifiedModConfig $modConfig
+$pluginProject = Resolve-DeclaredFile $root $config.project '.csproj' 'Plugin project'
+$testProjects = @($config.testProjects | ForEach-Object { Resolve-DeclaredFile $root $_ '.csproj' 'Test project' })
+$guards = @($config.guardScripts | ForEach-Object { Resolve-DeclaredFile $root $_ '.ps1' 'Guard script' })
+if ($testProjects -contains $pluginProject) { throw 'mod.json project must not also appear in testProjects.' }
+if ($DeployToGame) {
+    Assert-NoReparseAncestor (Join-Path $resolvedGame "BepInEx/plugins/$($config.assemblyName)") 'Plugin deployment directory'
+}
 
 $commonProperties = @(
     "-p:GameApiMode=$GameApiMode",

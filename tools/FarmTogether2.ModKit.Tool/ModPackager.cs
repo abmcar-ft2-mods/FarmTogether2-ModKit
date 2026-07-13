@@ -194,6 +194,39 @@ internal static class ModPackager
                 entry.FullName.Split('/').Any(segment => segment.Length == 0 || segment is "." or "..") ||
                 entry.Name.Length == 0 || entry.LastWriteTime.DateTime != FixedTimestamp.DateTime || entry.ExternalAttributes != 0)
                 throw new InvalidDataException("Archive contains an unsafe or noncanonical entry.");
+
+            (uint crc32, long length) payload;
+            try
+            {
+                using Stream payloadStream = entry.Open();
+                payload = ReadPayload(payloadStream);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or IOException)
+            {
+                throw new InvalidDataException($"Archive entry payload decompression failed: {entry.FullName}", exception);
+            }
+            if (payload.length != entry.Length || payload.crc32 != entry.Crc32)
+                throw new InvalidDataException($"Archive entry payload length or CRC-32 mismatch: {entry.FullName}");
+        }
+    }
+
+    private static (uint crc32, long length) ReadPayload(Stream stream)
+    {
+        uint crc = uint.MaxValue;
+        long length = 0;
+        Span<byte> buffer = stackalloc byte[8192];
+        while (true)
+        {
+            int read = stream.Read(buffer);
+            if (read == 0)
+                return (~crc, length);
+            length = checked(length + read);
+            foreach (byte value in buffer[..read])
+            {
+                crc ^= value;
+                for (int bit = 0; bit < 8; bit++)
+                    crc = (crc & 1) == 0 ? crc >> 1 : (crc >> 1) ^ 0xedb88320u;
+            }
         }
     }
 
