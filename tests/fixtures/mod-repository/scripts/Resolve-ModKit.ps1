@@ -241,7 +241,7 @@ function Assert-ReleaseSnapshotEqual([object]$Expected, [object]$Actual) {
 }
 
 function Invoke-Git([string[]]$Arguments, [string]$Label) {
-    $output = @(& git @Arguments)
+    $output = @(& git --no-replace-objects @Arguments)
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
