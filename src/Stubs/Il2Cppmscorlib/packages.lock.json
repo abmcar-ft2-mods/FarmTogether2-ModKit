@@ -4,9 +4,9 @@
     "net6.0": {
       "Il2CppInterop.Common": {
         "type": "Direct",
-        "requested": "[1.5.1-ci.829, )",
-        "resolved": "1.5.1-ci.829",
-        "contentHash": "tATowAc0TeJUMFi20aP1+Nh2HmHPU1XnWX3HRTx1C07uo/gcv6j32thgr08A5qLnE2e7LZ+g+kOpW9ACxEdKNg==",
+        "requested": "[1.5.1-ci.845, )",
+        "resolved": "1.5.1-ci.845",
+        "contentHash": "RSyv7RU+kDeo0iS96YCIJTrmn0eLfJOmdlQhROm+NSdEH7ShKS7XOaNjgRrcIKocxKuO3Gc8iD9lwF31tP7TqQ==",
         "dependencies": {
           "Iced": "1.17.0",
           "Microsoft.Extensions.Logging.Abstractions": "6.0.1",
