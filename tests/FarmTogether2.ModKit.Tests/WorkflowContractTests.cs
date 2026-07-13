@@ -105,6 +105,9 @@ public sealed class WorkflowContractTests
         { ReferenceReleasePath, "scripts/Pack-GameApiRef.ps1", "dotnet pack", "noncanonical reference writer" },
         { CiPath, "dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", "dotnet restore 'FarmTogether2-ModKit.sln'", "unlocked restore" },
         { CiPath, "-warnaserror", "", "warnings not errors" },
+        { CiPath, "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'", "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n          if ($LASTEXITCODE -ne 0) { throw 'Caller workflow validation failed.' }", "PowerShell caller validation checked an undefined native exit code" },
+        { CiPath, "      - name: Validate generated caller workflows\n        shell: pwsh", "      - name: Validate generated caller workflows\n        shell: bash", "caller workflow validation shell" },
+        { CiPath, "      - name: Check repository diff and leakage policy", "      - name: Duplicate caller workflow validation\n        shell: pwsh\n        run: |\n          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n      - name: Check repository diff and leakage policy", "duplicate caller workflow validation" },
         { CiPath, "scripts/Test-Repository.ps1", "scripts/Test-Candidate.ps1", "missing leakage scan" },
         { DependabotPath, "interval: weekly", "interval: daily", "non-weekly Dependabot" },
         { DependabotPath, "package-ecosystem: nuget", "package-ecosystem: npm", "extra Dependabot ecosystem" },
@@ -174,6 +177,36 @@ public sealed class WorkflowContractTests
                 }
             }
         }
+    }
+
+    [Fact]
+    public void CiCallerWorkflowValidationSucceedsInFreshPowerShell()
+    {
+        YamlMappingNode root = ParseYaml(LoadFiles()[CiPath], CiPath);
+        YamlMappingNode verify = Mapping(Mapping(root, "jobs", CiPath), "verify", CiPath);
+        YamlMappingNode[] steps = Sequence(verify, "steps", CiPath).Children
+            .Select((step, index) => AsMapping(step, $"{CiPath} verify step {index}"))
+            .Where(step => OptionalScalar(step, "name") == "Validate generated caller workflows")
+            .ToArray();
+        Assert.Single(steps);
+        string script = Scalar(steps[0], "run", CiPath);
+
+        ProcessStartInfo startInfo = new("pwsh")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            WorkingDirectory = Root
+        };
+        foreach (string argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script })
+            startInfo.ArgumentList.Add(argument);
+        using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh.");
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        Assert.True(process.ExitCode == 0, $"Caller workflow validation failed in a fresh PowerShell process.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        Assert.Contains("[caller-workflows] OK", stdout, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -316,7 +349,18 @@ public sealed class WorkflowContractTests
         Require(text.Contains("-warnaserror", StringComparison.Ordinal), "CI build must treat warnings as errors.");
         Require(text.Contains("dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore", StringComparison.Ordinal), "CI must run all tests.");
         Require(text.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) && text.Contains("ref-package verify", StringComparison.Ordinal), "CI must write and inspect the reference package.");
-        Require(text.Contains("tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1", StringComparison.Ordinal), "CI must validate caller workflows.");
+        YamlMappingNode verify = Mapping(Mapping(root, "jobs", CiPath), "verify", CiPath);
+        YamlMappingNode[] callerValidationSteps = Sequence(verify, "steps", CiPath).Children
+            .Select((step, index) => AsMapping(step, $"{CiPath} verify step {index}"))
+            .Where(step => OptionalScalar(step, "run")?.Contains(
+                "tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1",
+                StringComparison.Ordinal) == true)
+            .ToArray();
+        Require(callerValidationSteps.Length == 1, "CI must contain exactly one caller workflow validation step.");
+        Require(OptionalScalar(callerValidationSteps[0], "name") == "Validate generated caller workflows", "CI caller workflow validation step has the wrong name.");
+        Require(OptionalScalar(callerValidationSteps[0], "shell") == "pwsh", "CI caller workflow validation must use pwsh.");
+        string callerValidation = Scalar(callerValidationSteps[0], "run", CiPath);
+        Require(!callerValidation.Contains("$LASTEXITCODE", StringComparison.Ordinal), "CI must not inspect native exit state after a PowerShell script.");
         Require(text.Contains("git diff --check", StringComparison.Ordinal) && text.Contains("scripts/Test-Repository.ps1", StringComparison.Ordinal), "CI must run diff and leakage checks.");
         Require(text.Contains("id: candidate", StringComparison.Ordinal) && text.Contains("FarmTogether2.GameApi.Ref-candidate-${{ github.sha }}", StringComparison.Ordinal), "CI main artifact identity is missing.");
         Require(text.Contains("retention-days: 7", StringComparison.Ordinal), "CI candidate retention must be seven days.");

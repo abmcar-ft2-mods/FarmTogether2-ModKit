@@ -132,9 +132,6 @@ jobs:
         run: |
           & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `
             -RepositoryRoot 'tests/fixtures/mod-repository'
-          if ($LASTEXITCODE -ne 0) {
-            throw "Caller workflow contract failed with exit code $LASTEXITCODE."
-          }
       - name: Check repository diff and leakage policy
         shell: pwsh
         run: |
