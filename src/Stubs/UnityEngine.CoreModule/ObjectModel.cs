@@ -5,6 +5,8 @@ public class Object : Il2CppSystem.Object
 {
     public Object(IntPtr pointer) : base(pointer) { }
     public int GetInstanceID() => throw new NotSupportedException("Compile-time reference only.");
+    public static void Destroy(Object obj) =>
+        throw new NotSupportedException("Compile-time reference only.");
     public static bool operator ==(Object? left, Object? right) =>
         throw new NotSupportedException("Compile-time reference only.");
     public static bool operator !=(Object? left, Object? right) =>
@@ -22,6 +24,12 @@ public class Component : Object
 public class Behaviour : Component
 {
     public Behaviour(IntPtr pointer) : base(pointer) { }
+
+    public bool enabled
+    {
+        get => throw new NotSupportedException("Compile-time reference only.");
+        set => throw new NotSupportedException("Compile-time reference only.");
+    }
 }
 
 public class MonoBehaviour : Behaviour
@@ -39,7 +47,7 @@ public class Texture : Object
     public Texture(IntPtr pointer) : base(pointer) { }
 }
 
-public class Texture2D : Texture
+public sealed class Texture2D : Texture
 {
     public Texture2D(IntPtr pointer) : base(pointer) { }
     public static Texture2D whiteTexture => throw new NotSupportedException("Compile-time reference only.");

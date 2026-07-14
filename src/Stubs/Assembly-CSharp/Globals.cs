@@ -1,3 +1,18 @@
+namespace Core
+{
+    public abstract class StageParameters : Il2CppSystem.Object
+    {
+        public StageParameters(IntPtr pointer) : base(pointer) =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public static bool IsOnline
+        {
+            get => throw new NotSupportedException("Compile-time reference only.");
+            set => throw new NotSupportedException("Compile-time reference only.");
+        }
+    }
+}
+
 public class GameGlobals : Il2CppSystem.Object
 {
     public GameGlobals(IntPtr pointer) : base(pointer) =>
@@ -12,6 +27,15 @@ public class GameGlobals : Il2CppSystem.Object
             throw new NotSupportedException("Compile-time reference only.");
 
         public static float TractorWorkSpeed(Logic.FarmFeatureLevel featureLevel) =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public static float WorkDuration(
+            Logic.WorkType workType,
+            Logic.WorkFlags workFlags,
+            Logic.Farm.FarmTileContents contents,
+            Logic.Definition.FarmItemDefinition definition,
+            bool antiCheat,
+            ref float multiplier) =>
             throw new NotSupportedException("Compile-time reference only.");
     }
 }
@@ -35,6 +59,14 @@ public class MilkCharacterController : UnityEngine.MonoBehaviour
 
     public UnityEngine.Vector3 WalkVelocity =>
         throw new NotSupportedException("Compile-time reference only.");
+
+    public void updateMovement(ref UnityEngine.Vector3 velocity, float deltaTime) =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public virtual void KinematicCharacterController_ICharacterController_UpdateVelocity(
+        ref UnityEngine.Vector3 currentVelocity,
+        float deltaTime) =>
+        throw new NotSupportedException("Compile-time reference only.");
 }
 
 public class Player : UnityEngine.MonoBehaviour
@@ -54,7 +86,7 @@ public class Player : UnityEngine.MonoBehaviour
     public WorkStateInfo WorkState =>
         throw new NotSupportedException("Compile-time reference only.");
 
-    public bool IsRemote =>
+    public virtual bool IsRemote =>
         throw new NotSupportedException("Compile-time reference only.");
 
     public static bool SkipWorkThrottle
@@ -64,6 +96,26 @@ public class Player : UnityEngine.MonoBehaviour
     }
 
     public bool UsingVehicle =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public bool CheckWorkThrottle(
+        Logic.WorkFlags workFlags,
+        Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile> tiles) =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public virtual void Update() =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public virtual void updateCharacterControllerParameters() =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public virtual bool DidPerformWork(
+        Logic.WorkType workType,
+        Logic.Definition.FarmItemDefinition definition,
+        Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile> tiles,
+        int selectedIndex,
+        Logic.WorkFlags workFlags,
+        double timestamp) =>
         throw new NotSupportedException("Compile-time reference only.");
 
     public enum PlayerState
@@ -86,7 +138,7 @@ public class Player : UnityEngine.MonoBehaviour
     }
 }
 
-public class LocalPlayer : Player
+public sealed class LocalPlayer : Player
 {
     public LocalPlayer(IntPtr pointer) : base(pointer) =>
         throw new NotSupportedException("Compile-time reference only.");
@@ -109,6 +161,24 @@ public class LocalPlayer : Player
     public void ReDoAutoTractor(
         Logic.FarmTileId tileId,
         Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile> tiles) =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public void StartAutoTractor() =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public override void Update() =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public override void updateCharacterControllerParameters() =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public override bool DidPerformWork(
+        Logic.WorkType workType,
+        Logic.Definition.FarmItemDefinition definition,
+        Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile> tiles,
+        int selectedIndex,
+        Logic.WorkFlags workFlags,
+        double timestamp) =>
         throw new NotSupportedException("Compile-time reference only.");
 
     public void StartWorking(
@@ -149,6 +219,30 @@ public class StageScript : UnityEngine.MonoBehaviour
     public bool HasLocalPlayer =>
         throw new NotSupportedException("Compile-time reference only.");
 
-    public bool IsLoaded =>
+    public virtual bool IsLoaded =>
+        throw new NotSupportedException("Compile-time reference only.");
+}
+
+public class WidgetOwner : UnityEngine.MonoBehaviour
+{
+    public WidgetOwner(IntPtr pointer) : base(pointer) =>
+        throw new NotSupportedException("Compile-time reference only.");
+}
+
+public class SelectedTiles : WidgetOwner
+{
+    public SelectedTiles(IntPtr pointer) : base(pointer) =>
+        throw new NotSupportedException("Compile-time reference only.");
+}
+
+public class SelectedTilesTractorWork : Il2CppSystem.Object
+{
+    public SelectedTilesTractorWork(IntPtr pointer) : base(pointer) =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public virtual void Apply(SelectedTiles tiles, LocalPlayer player) =>
+        throw new NotSupportedException("Compile-time reference only.");
+
+    public virtual bool Check(SelectedTiles tiles, LocalPlayer player) =>
         throw new NotSupportedException("Compile-time reference only.");
 }

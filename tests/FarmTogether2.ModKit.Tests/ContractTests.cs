@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
@@ -13,37 +14,229 @@ public sealed class ContractTests
 {
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
 
+    [Theory]
+    [InlineData("FarmTogether2.AutoSellMod", "AutoSellMod")]
+    [InlineData("FarmTogether2.QoLMod", "QoLMod")]
+    [InlineData("FarmTogether2.AutoModRangeMod", "AutoModRangeMod")]
+    [InlineData("FarmTogether2.FarmhandSpeedMod", "FarmhandSpeedMod")]
+    public void ExporterMapsRuntimeSourcesFromSplitProjectDirectories(
+        string projectDirectory,
+        string legacyDirectory)
+    {
+        string script = File.ReadAllText(Path.Combine(Root, "scripts/Export-GameApiContract.ps1"));
+        Assert.Contains($"sourceDirectory = '{projectDirectory}'", script, StringComparison.Ordinal);
+        Assert.DoesNotContain($"sourceDirectory = '{legacyDirectory}'", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RuntimeTargetParserResolvesCurrentHelperShapesAgainstSyntheticInterop()
+    {
+        string directory = Directory.CreateTempSubdirectory("ft2-runtime-parser-").FullName;
+        try
+        {
+            string interop = Path.Combine(directory, "interop");
+            Directory.CreateDirectory(interop);
+            CreateRuntimeParserInterop(interop);
+
+            string source = Path.Combine(directory, "Plugin.cs");
+            File.WriteAllText(
+                source,
+                """
+                ResolvePatch(
+                    ResolveMethodByTypeName("Synthetic.ByNameTarget", "NoArgs"),
+                    Type.EmptyTypes);
+                ResolvePatch(
+                    AccessTools.Method(
+                        typeof(Synthetic.OverloadedTarget),
+                        nameof(Synthetic.OverloadedTarget.Execute),
+                        new[] { typeof(int), typeof(Synthetic.Payload) }));
+                ResolveRequiredPrefix(typeof(Synthetic.RequiredTarget), "Prefix");
+                ResolveRequiredPostfix(typeof(Synthetic.RequiredTarget), "Postfix");
+                new HarmonyPatchSpec(typeof(Synthetic.SpecTarget), "Apply");
+                """.Replace("\r\n", "\n", StringComparison.Ordinal) + "\n",
+                new UTF8Encoding(false));
+
+            string library = CreateExporterLibraryCopy(directory);
+            string output = Path.Combine(directory, "targets.json");
+            ProcessStartInfo startInfo = NewPowerShellStartInfo();
+            startInfo.ArgumentList.Add("-Command");
+            startInfo.ArgumentList.Add(
+                """
+                . $env:FT2_EXPORT_LIBRARY `
+                    -PluginAssembly @('unused-a','unused-b','unused-c','unused-d') `
+                    -RuntimeSource @('unused-a','unused-b','unused-c','unused-d') `
+                    -InteropMapPath 'unused-map' `
+                    -Output 'unused-output'
+                Import-MonoCecil
+                $context = New-InteropContext $env:FT2_INTEROP
+                try {
+                    $targets = @{}
+                    Resolve-RuntimeTargets `
+                        -Text ([IO.File]::ReadAllText($env:FT2_RUNTIME_SOURCE, [Text.Encoding]::UTF8)) `
+                        -PluginName 'Synthetic.Plugin' `
+                        -ModId 'com.example.synthetic' `
+                        -Context $context `
+                        -Targets $targets
+                    [object[]]$items = @($targets.Values | Sort-Object Type, Signature | ForEach-Object {
+                        [ordered]@{
+                            assembly = $_.Assembly
+                            type = $_.Type
+                            kind = $_.Kind
+                            signature = $_.Signature
+                            required = [bool]$_.Required
+                            modIds = @($_.ModIds | Sort-Object)
+                        }
+                    })
+                    $json = ConvertTo-Json -InputObject $items -Depth 10 -Compress
+                    [IO.File]::WriteAllText($env:FT2_RUNTIME_TARGETS, $json, [Text.UTF8Encoding]::new($false))
+                }
+                finally {
+                    Close-InteropContext $context
+                }
+                """);
+            startInfo.Environment["FT2_EXPORT_LIBRARY"] = library;
+            startInfo.Environment["FT2_INTEROP"] = interop;
+            startInfo.Environment["FT2_RUNTIME_SOURCE"] = source;
+            startInfo.Environment["FT2_RUNTIME_TARGETS"] = output;
+
+            ProcessResult result = RunProcess(startInfo);
+            Assert.True(result.ExitCode == 0,
+                $"pwsh exited {result.ExitCode}. stdout: {result.StandardOutput} stderr: {result.StandardError}");
+
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(output));
+            string[] actual = document.RootElement.EnumerateArray()
+                .Select(target =>
+                {
+                    Assert.Equal("Assembly-CSharp", target.GetProperty("assembly").GetString());
+                    Assert.Equal("method", target.GetProperty("kind").GetString());
+                    Assert.True(target.GetProperty("required").GetBoolean());
+                    Assert.Equal(
+                        ["com.example.synthetic"],
+                        target.GetProperty("modIds").EnumerateArray().Select(value => value.GetString()!).ToArray());
+                    return $"{target.GetProperty("type").GetString()}:{target.GetProperty("signature").GetString()}";
+                })
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            Assert.Equal(
+                new[]
+                {
+                    "Synthetic.ByNameTarget:System.Void NoArgs()",
+                    "Synthetic.OverloadedTarget:System.Void Execute(System.Int32,Synthetic.Payload)",
+                    "Synthetic.RequiredTarget:System.Void Postfix()",
+                    "Synthetic.RequiredTarget:System.Void Prefix()",
+                    "Synthetic.SpecTarget:System.Void Apply()"
+                }.Order(StringComparer.Ordinal),
+                actual);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void ContractHasApprovedDirectSurface()
     {
         GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
         Assert.Equal(1, contract.SchemaVersion);
-        Assert.Equal(57, contract.DirectTypes.Count);
-        Assert.Equal(110, contract.DirectMembers.Count);
-        Assert.Equal(57, contract.DirectTypes.Select(x => $"{x.Assembly}:{x.Type}").Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(110, contract.DirectMembers.Select(x => $"{x.Assembly}:{x.DeclaringType}:{x.Signature}").Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(63, contract.DirectTypes.Count);
+        Assert.Equal(137, contract.DirectMembers.Count);
+        Assert.Equal(63, contract.DirectTypes.Select(x => $"{x.Assembly}:{x.Type}").Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(137, contract.DirectMembers.Select(x => $"{x.Assembly}:{x.DeclaringType}:{x.Signature}").Distinct(StringComparer.Ordinal).Count());
     }
 
     [Theory]
-    [InlineData("com.abmcar.farmtogether2.qolmod", "GameGlobals.Game", "System.Single TractorWorkSpeed(Logic.FarmFeatureLevel)")]
-    [InlineData("com.abmcar.farmtogether2.automodrangemod", "LocalPlayer", "System.Void UpdateFarmTiles(Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile>,System.Boolean,System.Boolean,System.Boolean)")]
-    [InlineData("com.abmcar.farmtogether2.automodrangemod", "LocalPlayer", "System.Void ReDoAutoTractor(Logic.FarmTileId,Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile>)")]
-    [InlineData("com.abmcar.farmtogether2.automodrangemod", "SelectedTilesTractorWork", "System.Void Apply(SelectedTiles,LocalPlayer)")]
-    [InlineData("com.abmcar.farmtogether2.automodrangemod", "SelectedTilesTractorWork", "System.Boolean Check(SelectedTiles,LocalPlayer)")]
-    [InlineData("com.abmcar.farmtogether2.farmhandspeedmod", "Logic.Farm.Buildings.FarmhandBuilding", "System.Void Tick(System.UInt32)")]
-    [InlineData("com.abmcar.farmtogether2.farmhandspeedmod", "View.Farmhands.LocalFarmhandView", "System.Void UpdateIdle()")]
-    public void RuntimeTargetIsExplicit(string modId, string type, string signature)
+    [InlineData("Assembly-CSharp", "Core.StageParameters", "class", "Il2CppSystem.Object")]
+    [InlineData("Assembly-CSharp", "Logic.ActionPerformedType", "enum", "System.Enum")]
+    [InlineData("Assembly-CSharp", "Logic.Farm.FarmData.ActionPerformedHandler", "class", "Il2CppSystem.MulticastDelegate")]
+    [InlineData("Il2Cppmscorlib", "Il2CppSystem.Delegate", "class", "Il2CppSystem.Object")]
+    [InlineData("UnityEngine.CoreModule", "UnityEngine.Behaviour", "class", "UnityEngine.Component")]
+    public void ContractContainsFinalHostedTypes(
+        string assembly,
+        string type,
+        string kind,
+        string baseType)
     {
         GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
-        Assert.Contains(contract.RuntimeTargets, x => x.Type == type && x.Signature == signature && x.ModIds.Contains(modId, StringComparer.Ordinal));
+        Assert.Contains(contract.DirectTypes, candidate =>
+            candidate.Assembly == assembly &&
+            candidate.Type == type &&
+            candidate.Kind == kind &&
+            candidate.BaseType == baseType &&
+            !candidate.SupportOnly);
+    }
+
+    [Theory]
+    [InlineData("Assembly-CSharp", "Core.StageParameters", "property", "System.Boolean IsOnline", true)]
+    [InlineData("Assembly-CSharp", "Logic.FarmMoney", "method", "Logic.FarmMoney op_Multiply(Logic.FarmMoney,System.Single)", true)]
+    [InlineData("Assembly-CSharp", "Logic.Farm.Buildings.BaseBuilding", "property", "System.UInt32 Id", false)]
+    [InlineData("Assembly-CSharp", "Logic.Farm.FarmData", "property", "Logic.Farm.FarmData.ActionPerformedHandler OnTownActionPerformed", false)]
+    [InlineData("Assembly-CSharp", "Logic.Farm.FarmData.ActionPerformedHandler", "method", "Logic.Farm.FarmData.ActionPerformedHandler op_Addition(Logic.Farm.FarmData.ActionPerformedHandler,Logic.Farm.FarmData.ActionPerformedHandler)", true)]
+    [InlineData("Assembly-CSharp", "Logic.Farm.FarmData.ActionPerformedHandler", "method", "Logic.Farm.FarmData.ActionPerformedHandler op_Implicit(System.Action<UnityEngine.Vector3,Logic.ActionPerformedType,System.UInt64,Logic.FarmMoney,Il2CppSystem.Collections.Generic.List<Logic.FarmResource>,System.Boolean>)", true)]
+    [InlineData("Assembly-CSharp", "Logic.Farm.FarmData.ActionPerformedHandler", "method", "Logic.Farm.FarmData.ActionPerformedHandler op_Subtraction(Logic.Farm.FarmData.ActionPerformedHandler,Logic.Farm.FarmData.ActionPerformedHandler)", true)]
+    [InlineData("Il2Cppmscorlib", "Il2CppSystem.Collections.Generic.List`1", "method", "System.Void RemoveAt(System.Int32)", false)]
+    [InlineData("Il2Cppmscorlib", "Il2CppSystem.Delegate", "method", "System.Boolean op_Inequality(Il2CppSystem.Delegate,Il2CppSystem.Delegate)", true)]
+    [InlineData("UnityEngine.CoreModule", "UnityEngine.Behaviour", "property", "System.Boolean enabled", false)]
+    [InlineData("UnityEngine.CoreModule", "UnityEngine.Object", "method", "System.Void Destroy(UnityEngine.Object)", true)]
+    public void ContractContainsFinalHostedMembers(
+        string assembly,
+        string declaringType,
+        string kind,
+        string signature,
+        bool isStatic)
+    {
+        GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
+        Assert.Contains(contract.DirectMembers, candidate =>
+            candidate.Assembly == assembly &&
+            candidate.DeclaringType == declaringType &&
+            candidate.Kind == kind &&
+            candidate.Signature == signature &&
+            candidate.IsStatic == isStatic);
+    }
+
+    [Fact]
+    public void ContractContainsExactUsedActionPerformedEnumValue()
+    {
+        GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
+        (string Name, long Value)[] actual = contract.EnumValues
+            .Where(value => value.Assembly == "Assembly-CSharp" && value.EnumType == "Logic.ActionPerformedType")
+            .Select(value => (value.Name, value.Value))
+            .ToArray();
+        Assert.Equal(
+            [
+                ("Exchange", 4L)
+            ],
+            actual);
+    }
+
+    [Theory]
+    [InlineData("com.abmcar.farmtogether2.qolmod", "GameGlobals.Game", "System.Single TractorWorkSpeed(Logic.FarmFeatureLevel)", true)]
+    [InlineData("com.abmcar.farmtogether2.automodrangemod", "LocalPlayer", "System.Void UpdateFarmTiles(Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile>,System.Boolean,System.Boolean,System.Boolean)", true)]
+    [InlineData("com.abmcar.farmtogether2.automodrangemod", "LocalPlayer", "System.Void ReDoAutoTractor(Logic.FarmTileId,Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile>)", true)]
+    [InlineData("com.abmcar.farmtogether2.automodrangemod", "SelectedTilesTractorWork", "System.Void Apply(SelectedTiles,LocalPlayer)", true)]
+    [InlineData("com.abmcar.farmtogether2.automodrangemod", "SelectedTilesTractorWork", "System.Boolean Check(SelectedTiles,LocalPlayer)", true)]
+    [InlineData("com.abmcar.farmtogether2.automodrangemod", "Logic.Farm.FarmData", "System.Void ClearCurrentFarm()", true)]
+    [InlineData("com.abmcar.farmtogether2.farmhandspeedmod", "Logic.Farm.Buildings.FarmhandBuilding", "System.Void Tick(System.UInt32)", true)]
+    [InlineData("com.abmcar.farmtogether2.farmhandspeedmod", "Logic.Farm.Buildings.FarmhandBuilding", "System.Void Removed()", true)]
+    [InlineData("com.abmcar.farmtogether2.farmhandspeedmod", "View.Farmhands.LocalFarmhandView", "System.Void UpdateIdle()", true)]
+    [InlineData("com.abmcar.farmtogether2.farmhandspeedmod", "View.Farmhands.FarmhandView", "System.Single workDuration", false)]
+    public void RuntimeTargetIsExplicit(string modId, string type, string signature, bool required)
+    {
+        GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
+        Assert.Contains(contract.RuntimeTargets, x =>
+            x.Type == type &&
+            x.Signature == signature &&
+            x.Required == required &&
+            x.ModIds.Contains(modId, StringComparer.Ordinal));
     }
 
     [Fact]
     public void RequiredRuntimeTargetsArePartOfDirectSurface()
     {
         GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
-        Assert.Equal(30, contract.RuntimeTargets.Count);
-        Assert.Equal(9, contract.RuntimeTargets.Count(x => x.Required));
+        Assert.Equal(32, contract.RuntimeTargets.Count);
+        Assert.Equal(26, contract.RuntimeTargets.Count(x => x.Required));
+        Assert.Equal(35, contract.RuntimeTargets.Sum(target => target.ModIds.Count));
         foreach (RuntimeTargetContract target in contract.RuntimeTargets.Where(x => x.Required))
         {
             Assert.Contains(contract.DirectMembers, member =>
@@ -335,6 +528,90 @@ public sealed class ContractTests
 
             assembly.Write(Path.Combine(directory, name + ".dll"));
         }
+    }
+
+    private static string CreateExporterLibraryCopy(string directory)
+    {
+        string exporter = File.ReadAllText(Path.Combine(Root, "scripts/Export-GameApiContract.ps1"), Encoding.UTF8);
+        Match invocation = Assert.Single(
+            Regex.Matches(exporter, "(?m)^Export-Contract\\r?$").Cast<Match>());
+        string suffix = exporter[(invocation.Index + invocation.Length)..];
+        Assert.Matches("^\\n?$", suffix);
+
+        string library = Path.Combine(directory, "Export-GameApiContract.Library.ps1");
+        File.WriteAllText(
+            library,
+            exporter.Remove(invocation.Index, invocation.Length),
+            new UTF8Encoding(false));
+        return library;
+    }
+
+    private static void CreateRuntimeParserInterop(string directory)
+    {
+        foreach ((string name, string version) in ApprovedAssemblies())
+        {
+            using AssemblyDefinition assembly = AssemblyDefinition.CreateAssembly(
+                new AssemblyNameDefinition(name, Version.Parse(version)),
+                name,
+                ModuleKind.Dll);
+            ModuleDefinition module = assembly.MainModule;
+            if (name == "Assembly-CSharp")
+                AddRuntimeParserTypes(module);
+            else
+                module.Types.Add(new TypeDefinition(
+                    "Synthetic",
+                    "PublicApi",
+                    TypeAttributes.Public | TypeAttributes.Class,
+                    module.TypeSystem.Object));
+            assembly.Write(Path.Combine(directory, name + ".dll"));
+        }
+    }
+
+    private static void AddRuntimeParserTypes(ModuleDefinition module)
+    {
+        TypeDefinition payload = AddRuntimeParserType(module, "Payload");
+        TypeDefinition byName = AddRuntimeParserType(module, "ByNameTarget");
+        AddRuntimeParserMethod(module, byName, "NoArgs");
+        AddRuntimeParserMethod(module, byName, "NoArgs", module.TypeSystem.Int32);
+
+        TypeDefinition overloaded = AddRuntimeParserType(module, "OverloadedTarget");
+        AddRuntimeParserMethod(module, overloaded, "Execute");
+        AddRuntimeParserMethod(module, overloaded, "Execute", module.TypeSystem.Int32, payload);
+        AddRuntimeParserMethod(module, overloaded, "Execute", module.TypeSystem.String, payload);
+
+        TypeDefinition required = AddRuntimeParserType(module, "RequiredTarget");
+        AddRuntimeParserMethod(module, required, "Prefix");
+        AddRuntimeParserMethod(module, required, "Postfix");
+
+        TypeDefinition spec = AddRuntimeParserType(module, "SpecTarget");
+        AddRuntimeParserMethod(module, spec, "Apply");
+    }
+
+    private static TypeDefinition AddRuntimeParserType(ModuleDefinition module, string name)
+    {
+        TypeDefinition type = new(
+            "Synthetic",
+            name,
+            TypeAttributes.Public | TypeAttributes.Class,
+            module.TypeSystem.Object);
+        module.Types.Add(type);
+        return type;
+    }
+
+    private static void AddRuntimeParserMethod(
+        ModuleDefinition module,
+        TypeDefinition type,
+        string name,
+        params TypeReference[] parameterTypes)
+    {
+        MethodDefinition method = new(
+            name,
+            MethodAttributes.Public | MethodAttributes.HideBySig,
+            module.TypeSystem.Void);
+        for (int index = 0; index < parameterTypes.Length; index++)
+            method.Parameters.Add(new ParameterDefinition($"value{index}", ParameterAttributes.None, parameterTypes[index]));
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        type.Methods.Add(method);
     }
 
     private static IReadOnlyDictionary<string, string> ApprovedAssemblies() => new Dictionary<string, string>(StringComparer.Ordinal)

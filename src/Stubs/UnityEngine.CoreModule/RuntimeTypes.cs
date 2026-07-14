@@ -6,7 +6,7 @@ public class Time : Il2CppSystem.Object
     public static float realtimeSinceStartup => throw new NotSupportedException("Compile-time reference only.");
 }
 
-public class Screen : Il2CppSystem.Object
+public sealed class Screen : Il2CppSystem.Object
 {
     public Screen(IntPtr pointer) : base(pointer) { }
     public static int width => throw new NotSupportedException("Compile-time reference only.");

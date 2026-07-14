@@ -4,6 +4,15 @@ namespace Logic.Farm.Buildings
     {
         public BaseBuilding(IntPtr pointer) : base(pointer) =>
             throw new NotSupportedException("Compile-time reference only.");
+
+        public virtual uint Id =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public virtual void Tick(uint ticksPassed) =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public virtual void Removed() =>
+            throw new NotSupportedException("Compile-time reference only.");
     }
 
     public class Building : BaseBuilding
@@ -16,6 +25,9 @@ namespace Logic.Farm.Buildings
     {
         public RangeBuilding(IntPtr pointer) : base(pointer) =>
             throw new NotSupportedException("Compile-time reference only.");
+
+        public virtual Milkstone.Utils.Int2 Range =>
+            throw new NotSupportedException("Compile-time reference only.");
     }
 
     public class FarmhandBuilding : RangeBuilding
@@ -23,7 +35,19 @@ namespace Logic.Farm.Buildings
         public FarmhandBuilding(IntPtr pointer) : base(pointer) =>
             throw new NotSupportedException("Compile-time reference only.");
 
-        public void Tick(uint ticksPassed) =>
+        public override void Tick(uint ticksPassed) =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public uint MaxEnergy =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public override Milkstone.Utils.Int2 Range =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public uint IncreaseEnergy(uint amount) =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public override void Removed() =>
             throw new NotSupportedException("Compile-time reference only.");
     }
 }
@@ -45,6 +69,9 @@ namespace View.Farmhands
             throw new NotSupportedException("Compile-time reference only.");
 
         public void UpdateGoingToTile(float deltaTime) =>
+            throw new NotSupportedException("Compile-time reference only.");
+
+        public void UpdateIdle() =>
             throw new NotSupportedException("Compile-time reference only.");
     }
 }

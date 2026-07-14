@@ -12,8 +12,8 @@ public sealed class StubAssemblyTests
     public void EveryContractEntryExistsInStubs()
     {
         GameApiContract contract = ContractJson.Load(Path.Combine(Root, "contracts/game-api.contract.json"));
-        Assert.Equal(57, contract.DirectTypes.Count);
-        Assert.Equal(110, contract.DirectMembers.Count);
+        Assert.Equal(63, contract.DirectTypes.Count);
+        Assert.Equal(137, contract.DirectMembers.Count);
 
         Dictionary<string, ModuleDefinition> modules = ApprovedAssemblyVersions().ToDictionary(
             entry => entry.Key,
@@ -33,6 +33,8 @@ public sealed class StubAssemblyTests
             foreach (DirectTypeContract expected in contract.DirectTypes)
             {
                 TypeDefinition actual = FindType(modules[expected.Assembly], expected.Type);
+                Assert.True(actual.IsPublic || actual.IsNestedPublic,
+                    $"Contract type '{expected.Assembly}:{expected.Type}' is not public.");
                 Assert.Equal(expected.Kind, GetTypeKind(actual));
                 Assert.Equal(expected.BaseType, NormalizeTypeName(actual.BaseType));
             }
@@ -42,6 +44,7 @@ public sealed class StubAssemblyTests
                 TypeDefinition declaringType = FindType(modules[expected.Assembly], expected.DeclaringType);
                 IMetadataTokenProvider actual = Assert.Single(FindMembers(declaringType, expected.Kind),
                     member => GetMemberSignature(member) == expected.Signature);
+                AssertPublicContractMember(actual, expected);
                 Assert.Equal(expected.IsStatic, IsStatic(actual));
             }
 
@@ -77,10 +80,12 @@ public sealed class StubAssemblyTests
         IReadOnlyList<TypeDefinition> gameTypes = GetAllTypes(module)
             .Where(type => type.IsPublic || type.IsNestedPublic)
             .ToList();
-        Assert.Equal(46, gameTypes.Count);
+        Assert.Equal(52, gameTypes.Count);
 
         IReadOnlyDictionary<string, string> expectedBases = new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["Core.StageParameters"] = "Il2CppSystem.Object",
+            ["Logic.ActionPerformedType"] = "System.Enum",
             ["Logic.FarmFeatureLevel"] = "System.Enum",
             ["Logic.ItemDefinition"] = "UnityEngine.ScriptableObject",
             ["Logic.Definition.ShopItemDefinition"] = "Logic.ItemDefinition",
@@ -96,9 +101,13 @@ public sealed class StubAssemblyTests
             ["Logic.Farm.Buildings.Building"] = "Logic.Farm.Buildings.BaseBuilding",
             ["Logic.Farm.Buildings.RangeBuilding"] = "Logic.Farm.Buildings.Building",
             ["Logic.Farm.Buildings.FarmhandBuilding"] = "Logic.Farm.Buildings.RangeBuilding",
+            ["Logic.Farm.FarmData.ActionPerformedHandler"] = "Il2CppSystem.MulticastDelegate",
             ["Logic.Farm.FarmTileContents"] = "Il2CppSystem.Object",
             ["Logic.Town.Items.TownUpgradeableInstance"] = "Logic.Town.TownItemInstance",
-            ["Logic.Town.Items.TownShopInstance"] = "Logic.Town.Items.TownUpgradeableInstance"
+            ["Logic.Town.Items.TownShopInstance"] = "Logic.Town.Items.TownUpgradeableInstance",
+            ["SelectedTiles"] = "WidgetOwner",
+            ["SelectedTilesTractorWork"] = "Il2CppSystem.Object",
+            ["WidgetOwner"] = "UnityEngine.MonoBehaviour"
         };
         foreach ((string name, string expectedBase) in expectedBases)
             Assert.Equal(expectedBase, NormalizeTypeName(FindType(module, name).BaseType));
@@ -126,9 +135,139 @@ public sealed class StubAssemblyTests
         AssertEnumValue(module, "Logic.WorkFlags", "TileModPriority", 2);
         AssertEnumValue(module, "Logic.WorkType", "Recycle", 4);
         AssertEnumValue(module, "Player.PlayerState", "Idle", 0);
+        AssertEnumValue(module, "Logic.ActionPerformedType", "Purchase", 0);
+        AssertEnumValue(module, "Logic.ActionPerformedType", "Harvest", 1);
+        AssertEnumValue(module, "Logic.ActionPerformedType", "Refill", 2);
+        AssertEnumValue(module, "Logic.ActionPerformedType", "Recycle", 3);
+        AssertEnumValue(module, "Logic.ActionPerformedType", "Exchange", 4);
+        AssertEnumValue(module, "Logic.ActionPerformedType", "Terraform", 5);
+        Assert.True(FindType(module, "Logic.FailedAction").IsSealed);
+        TypeDefinition farmTileId = FindType(module, "Logic.FarmTileId");
+        Assert.True(Assert.Single(farmTileId.Fields, field => field.Name == "_TileX").IsInitOnly);
+        Assert.True(Assert.Single(farmTileId.Fields, field => field.Name == "_TileY").IsInitOnly);
+        Assert.Equal("System.Byte", FindType(module, "Logic.ActionPerformedType").Fields.Single(field => field.Name == "value__").FieldType.FullName);
         Assert.Equal("System.Byte", FindType(module, "Logic.FarmFloorType").Fields.Single(field => field.Name == "value__").FieldType.FullName);
         Assert.Equal("System.Byte", FindType(module, "Logic.FarmResourceType").Fields.Single(field => field.Name == "value__").FieldType.FullName);
         Assert.Equal("System.Byte", FindType(module, "Logic.FarmTileState").Fields.Single(field => field.Name == "value__").FieldType.FullName);
+    }
+
+    [Fact]
+    public void AssemblyCSharpHasExactFinalModHostedSurface()
+    {
+        using ModuleDefinition module = ReadStub("Assembly-CSharp");
+
+        TypeDefinition stageParameters = FindType(module, "Core.StageParameters");
+        Assert.True(stageParameters.IsPublic);
+        Assert.True(stageParameters.IsAbstract);
+        // C# cannot preserve both the IL2CPP Object base and abstract+sealed metadata.
+        Assert.False(stageParameters.IsSealed);
+        Assert.Equal("Il2CppSystem.Object", NormalizeTypeName(stageParameters.BaseType));
+        PropertyDefinition isOnline = Assert.Single(stageParameters.Properties, property =>
+            GetMemberSignature(property) == "System.Boolean IsOnline");
+        Assert.True(GetPropertyStaticness(isOnline));
+        Assert.NotNull(isOnline.GetMethod);
+        Assert.NotNull(isOnline.SetMethod);
+
+        TypeDefinition farmData = FindType(module, "Logic.Farm.FarmData");
+        TypeDefinition farmMoney = FindType(module, "Logic.FarmMoney");
+        AssertMethod(
+            farmMoney,
+            "Logic.FarmMoney op_Multiply(Logic.FarmMoney,System.Single)",
+            isStatic: true,
+            isSpecialName: true);
+        TypeDefinition handler = FindType(module, "Logic.Farm.FarmData.ActionPerformedHandler");
+        Assert.True(handler.IsNestedPublic);
+        Assert.True(handler.IsSealed);
+        Assert.Equal("Il2CppSystem.MulticastDelegate", NormalizeTypeName(handler.BaseType));
+        AssertMethod(handler, "System.Void .ctor(Il2CppSystem.Object,System.IntPtr)", isStatic: false);
+        AssertMethod(handler, "System.Void .ctor(System.IntPtr)", isStatic: false);
+        MethodDefinition handlerInvoke = AssertMethod(
+            handler,
+            "System.Void Invoke(UnityEngine.Vector3,Logic.ActionPerformedType,System.UInt64,Logic.FarmMoney,Il2CppSystem.Collections.Generic.List<Logic.FarmResource>,System.Boolean)",
+            isStatic: false);
+        // A sealed C# type cannot declare the virtual NewSlot method used by the generated interop wrapper.
+        Assert.False(handlerInvoke.IsVirtual);
+        AssertMethod(
+            handler,
+            "Logic.Farm.FarmData.ActionPerformedHandler op_Implicit(System.Action<UnityEngine.Vector3,Logic.ActionPerformedType,System.UInt64,Logic.FarmMoney,Il2CppSystem.Collections.Generic.List<Logic.FarmResource>,System.Boolean>)",
+            isStatic: true,
+            isSpecialName: true);
+        AssertMethod(
+            handler,
+            "Logic.Farm.FarmData.ActionPerformedHandler op_Addition(Logic.Farm.FarmData.ActionPerformedHandler,Logic.Farm.FarmData.ActionPerformedHandler)",
+            isStatic: true,
+            isSpecialName: true);
+        AssertMethod(
+            handler,
+            "Logic.Farm.FarmData.ActionPerformedHandler op_Subtraction(Logic.Farm.FarmData.ActionPerformedHandler,Logic.Farm.FarmData.ActionPerformedHandler)",
+            isStatic: true,
+            isSpecialName: true);
+
+        PropertyDefinition townAction = Assert.Single(farmData.Properties, property =>
+            GetMemberSignature(property) == "Logic.Farm.FarmData.ActionPerformedHandler OnTownActionPerformed");
+        Assert.False(GetPropertyStaticness(townAction));
+        Assert.NotNull(townAction.GetMethod);
+        Assert.NotNull(townAction.SetMethod);
+        Assert.DoesNotContain(farmData.Events, candidate => candidate.Name == "OnTownActionPerformed");
+
+        TypeDefinition baseBuilding = FindType(module, "Logic.Farm.Buildings.BaseBuilding");
+        PropertyDefinition id = Assert.Single(baseBuilding.Properties, property =>
+            GetMemberSignature(property) == "System.UInt32 Id");
+        Assert.False(GetPropertyStaticness(id));
+        Assert.NotNull(id.GetMethod);
+        AssertVirtualSlot(Assert.IsType<MethodDefinition>(id.GetMethod), newSlot: true);
+        Assert.Null(id.SetMethod);
+
+        AssertVirtualSlot(AssertMethod(baseBuilding, "System.Void Tick(System.UInt32)", isStatic: false), newSlot: true);
+        AssertVirtualSlot(AssertMethod(baseBuilding, "System.Void Removed()", isStatic: false), newSlot: true);
+
+        TypeDefinition rangeBuilding = FindType(module, "Logic.Farm.Buildings.RangeBuilding");
+        AssertVirtualSlot(AssertMethod(rangeBuilding, "Milkstone.Utils.Int2 get_Range()", isStatic: false), newSlot: true);
+
+        TypeDefinition farmhandBuilding = FindType(module, "Logic.Farm.Buildings.FarmhandBuilding");
+        AssertVirtualSlot(AssertMethod(farmhandBuilding, "System.Void Tick(System.UInt32)", isStatic: false), newSlot: false);
+        AssertVirtualSlot(AssertMethod(farmhandBuilding, "System.Void Removed()", isStatic: false), newSlot: false);
+        AssertVirtualSlot(AssertMethod(farmhandBuilding, "Milkstone.Utils.Int2 get_Range()", isStatic: false), newSlot: false);
+
+        TypeDefinition player = FindType(module, "Player");
+        TypeDefinition localPlayer = FindType(module, "LocalPlayer");
+        Assert.True(localPlayer.IsSealed);
+        string didPerformWork = "System.Boolean DidPerformWork(Logic.WorkType,Logic.Definition.FarmItemDefinition,Il2CppSystem.Collections.Generic.List<Logic.Farm.FarmTile>,System.Int32,Logic.WorkFlags,System.Double)";
+        foreach (string signature in new[]
+                 {
+                     "System.Void Update()",
+                     "System.Void updateCharacterControllerParameters()",
+                     didPerformWork
+                 })
+        {
+            AssertVirtualSlot(AssertMethod(player, signature, isStatic: false), newSlot: true);
+            AssertVirtualSlot(AssertMethod(localPlayer, signature, isStatic: false), newSlot: false);
+        }
+
+        PropertyDefinition isRemote = Assert.Single(player.Properties, property =>
+            GetMemberSignature(property) == "System.Boolean IsRemote");
+        AssertVirtualSlot(Assert.IsType<MethodDefinition>(isRemote.GetMethod), newSlot: true);
+
+        TypeDefinition controller = FindType(module, "MilkCharacterController");
+        AssertVirtualSlot(AssertMethod(
+            controller,
+            "System.Void KinematicCharacterController_ICharacterController_UpdateVelocity(UnityEngine.Vector3&,System.Single)",
+            isStatic: false), newSlot: true);
+
+        TypeDefinition stageScript = FindType(module, "StageScript");
+        PropertyDefinition isLoaded = Assert.Single(stageScript.Properties, property =>
+            GetMemberSignature(property) == "System.Boolean IsLoaded");
+        AssertVirtualSlot(Assert.IsType<MethodDefinition>(isLoaded.GetMethod), newSlot: true);
+
+        TypeDefinition tractorWork = FindType(module, "SelectedTilesTractorWork");
+        AssertVirtualSlot(AssertMethod(
+            tractorWork,
+            "System.Void Apply(SelectedTiles,LocalPlayer)",
+            isStatic: false), newSlot: true);
+        AssertVirtualSlot(AssertMethod(
+            tractorWork,
+            "System.Boolean Check(SelectedTiles,LocalPlayer)",
+            isStatic: false), newSlot: true);
     }
 
     [Fact]
@@ -140,9 +279,32 @@ public sealed class StubAssemblyTests
         Assert.Equal(new Version(4, 0, 0, 0), module.Assembly.Name.Version);
         Assert.Empty(module.Assembly.Name.PublicKeyToken);
         TypeDefinition list = Assert.Single(module.Types, x => x.FullName == "Il2CppSystem.Collections.Generic.List`1");
-        Assert.Contains(list.Properties, x => x.Name == "Count" && x.PropertyType.FullName == "System.Int32");
-        Assert.Contains(list.Properties, x => x.Name == "Item" && x.Parameters.Count == 1);
-        Assert.Contains(list.Methods, x => x.Name == "Add" && x.Parameters.Count == 1);
+        PropertyDefinition count = Assert.Single(list.Properties, x => x.Name == "Count" && x.PropertyType.FullName == "System.Int32");
+        AssertVirtualSlot(Assert.IsType<MethodDefinition>(count.GetMethod), newSlot: true);
+        PropertyDefinition item = Assert.Single(list.Properties, x => x.Name == "Item" && x.Parameters.Count == 1);
+        AssertVirtualSlot(Assert.IsType<MethodDefinition>(item.GetMethod), newSlot: true);
+        MethodDefinition add = Assert.Single(list.Methods, x => x.Name == "Add" && x.Parameters.Count == 1);
+        AssertVirtualSlot(add, newSlot: true);
+        MethodDefinition removeAt = AssertMethod(list, "System.Void RemoveAt(System.Int32)", isStatic: false);
+        AssertVirtualSlot(removeAt, newSlot: true);
+
+        TypeDefinition @delegate = Assert.Single(module.Types, type => type.FullName == "Il2CppSystem.Delegate");
+        Assert.Equal("Il2CppSystem.Object", NormalizeTypeName(@delegate.BaseType));
+        AssertMethod(@delegate, "System.Void .ctor(System.IntPtr)", isStatic: false);
+        AssertMethod(
+            @delegate,
+            "System.Boolean op_Equality(Il2CppSystem.Delegate,Il2CppSystem.Delegate)",
+            isStatic: true,
+            isSpecialName: true);
+        AssertMethod(
+            @delegate,
+            "System.Boolean op_Inequality(Il2CppSystem.Delegate,Il2CppSystem.Delegate)",
+            isStatic: true,
+            isSpecialName: true);
+
+        TypeDefinition multicastDelegate = Assert.Single(module.Types, type => type.FullName == "Il2CppSystem.MulticastDelegate");
+        Assert.Equal("Il2CppSystem.Delegate", NormalizeTypeName(multicastDelegate.BaseType));
+        AssertMethod(multicastDelegate, "System.Void .ctor(System.IntPtr)", isStatic: false);
     }
 
     [Fact]
@@ -154,12 +316,24 @@ public sealed class StubAssemblyTests
         TypeDefinition unityObject = module.GetType("UnityEngine.Object");
         Assert.Contains(unityObject.Methods, x => x.Name == "op_Equality" && x.IsSpecialName && x.IsStatic);
         Assert.Contains(unityObject.Methods, x => x.Name == "op_Inequality" && x.IsSpecialName && x.IsStatic);
+        AssertMethod(unityObject, "System.Void Destroy(UnityEngine.Object)", isStatic: true);
+        Assert.Equal(1, unityObject.Methods.Count(method => method.Name == "Destroy"));
+
+        TypeDefinition behaviour = module.GetType("UnityEngine.Behaviour");
+        PropertyDefinition enabled = Assert.Single(behaviour.Properties, property =>
+            GetMemberSignature(property) == "System.Boolean enabled");
+        Assert.False(GetPropertyStaticness(enabled));
+        Assert.NotNull(enabled.GetMethod);
+        Assert.NotNull(enabled.SetMethod);
         Assert.Equal("UnityEngine.Behaviour", module.GetType("UnityEngine.MonoBehaviour").BaseType.FullName);
         MethodDefinition getComponentInParent = Assert.Single(module.GetType("UnityEngine.Component").Methods,
             x => x.Name == "GetComponentInParent" && x.HasGenericParameters && x.Parameters.Count == 0);
         Assert.Empty(Assert.Single(getComponentInParent.GenericParameters).Constraints);
         Assert.Contains(module.GetType("UnityEngine.Vector2").Properties, x => x.Name == "magnitude");
-        Assert.Contains(module.GetType("UnityEngine.Texture2D").Properties, x => x.Name == "whiteTexture");
+        TypeDefinition texture2D = module.GetType("UnityEngine.Texture2D");
+        Assert.True(texture2D.IsSealed);
+        Assert.Contains(texture2D.Properties, x => x.Name == "whiteTexture");
+        Assert.True(module.GetType("UnityEngine.Screen").IsSealed);
         TypeDefinition mathf = module.GetType("UnityEngine.Mathf");
         Assert.True(mathf.IsValueType);
         Assert.Equal("System.ValueType", mathf.BaseType.FullName);
@@ -204,9 +378,15 @@ public sealed class StubAssemblyTests
         Assert.Contains(gui.Methods, x => x.Name == "DrawTexture" && x.IsStatic && x.Parameters.Count == 2);
         Assert.Contains(gui.Properties, x => x.Name == "color" && x.GetMethod?.IsStatic == true && x.SetMethod?.IsStatic == true);
         Assert.Contains(gui.Properties, x => x.Name == "skin" && x.GetMethod?.IsStatic == true);
-        Assert.Contains(imgui.GetType("UnityEngine.GUISkin").Properties, x => x.Name == "label");
-        Assert.Contains(imgui.GetType("UnityEngine.GUIStyle").Properties, x => x.Name == "normal");
-        Assert.Contains(imgui.GetType("UnityEngine.GUIStyleState").Properties, x => x.Name == "textColor");
+        TypeDefinition guiSkin = imgui.GetType("UnityEngine.GUISkin");
+        TypeDefinition guiStyle = imgui.GetType("UnityEngine.GUIStyle");
+        TypeDefinition guiStyleState = imgui.GetType("UnityEngine.GUIStyleState");
+        Assert.True(guiSkin.IsSealed);
+        Assert.True(guiStyle.IsSealed);
+        Assert.True(guiStyleState.IsSealed);
+        Assert.Contains(guiSkin.Properties, x => x.Name == "label");
+        Assert.Contains(guiStyle.Properties, x => x.Name == "normal");
+        Assert.Contains(guiStyleState.Properties, x => x.Name == "textColor");
     }
 
     private static ModuleDefinition ReadStub(string name) => ModuleDefinition.ReadModule(
@@ -289,10 +469,36 @@ public sealed class StubAssemblyTests
         _ => throw new InvalidDataException($"Unsupported metadata member '{member.GetType().FullName}'.")
     };
 
+    private static void AssertPublicContractMember(
+        IMetadataTokenProvider member,
+        DirectMemberContract expected)
+    {
+        string context = $"Contract member '{expected.Assembly}:{expected.DeclaringType}:{expected.Signature}'";
+        switch (member)
+        {
+            case FieldDefinition field:
+                Assert.True(field.IsPublic, $"{context} is not public.");
+                break;
+            case MethodDefinition method:
+                Assert.True(method.IsPublic, $"{context} is not public.");
+                break;
+            case PropertyDefinition property:
+                MethodDefinition[] accessors = new[] { property.GetMethod, property.SetMethod }
+                    .OfType<MethodDefinition>()
+                    .ToArray();
+                Assert.NotEmpty(accessors);
+                Assert.All(accessors, accessor =>
+                    Assert.True(accessor.IsPublic, $"{context} accessor '{accessor.Name}' is not public."));
+                break;
+            default:
+                throw new InvalidDataException($"Unsupported metadata member '{member.GetType().FullName}'.");
+        }
+    }
+
     private static bool GetPropertyStaticness(PropertyDefinition property)
     {
-        MethodDefinition? accessor = property.GetMethod ?? property.SetMethod;
-        Assert.NotNull(accessor);
+        MethodDefinition accessor = property.GetMethod ?? property.SetMethod ??
+            throw new InvalidDataException($"Property '{property.FullName}' has no accessor.");
         if (property.GetMethod is not null && property.SetMethod is not null)
             Assert.Equal(property.GetMethod.IsStatic, property.SetMethod.IsStatic);
         return accessor.IsStatic;
@@ -329,6 +535,26 @@ public sealed class StubAssemblyTests
         FieldDefinition field = Assert.Single(FindType(module, typeName).Fields, candidate => candidate.Name == fieldName);
         Assert.True(field.HasConstant);
         Assert.Equal(expected, Convert.ToInt64(field.Constant, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void AssertVirtualSlot(MethodDefinition method, bool newSlot)
+    {
+        Assert.True(method.IsVirtual, $"{method.FullName} is not virtual.");
+        Assert.False(method.IsFinal, $"{method.FullName} is final.");
+        Assert.Equal(newSlot, method.IsNewSlot);
+    }
+
+    private static MethodDefinition AssertMethod(
+        TypeDefinition type,
+        string signature,
+        bool isStatic,
+        bool? isSpecialName = null)
+    {
+        MethodDefinition method = Assert.Single(type.Methods, candidate => GetMemberSignature(candidate) == signature);
+        Assert.Equal(isStatic, method.IsStatic);
+        if (isSpecialName.HasValue)
+            Assert.Equal(isSpecialName.Value, method.IsSpecialName);
+        return method;
     }
 
     private static void AssertThrowsNotSupported(MethodDefinition method)

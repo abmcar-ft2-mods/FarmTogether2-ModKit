@@ -53,10 +53,10 @@ $script:ApprovedAssemblies = [ordered]@{
 }
 
 $script:ApprovedPlugins = [ordered]@{
-    'FarmTogether2.AutoSellMod'       = [ordered]@{ modId = 'com.abmcar.farmtogether2.autosellmod'; sourceDirectory = 'AutoSellMod' }
-    'FarmTogether2.QoLMod'            = [ordered]@{ modId = 'com.abmcar.farmtogether2.qolmod'; sourceDirectory = 'QoLMod' }
-    'FarmTogether2.AutoModRangeMod'   = [ordered]@{ modId = 'com.abmcar.farmtogether2.automodrangemod'; sourceDirectory = 'AutoModRangeMod' }
-    'FarmTogether2.FarmhandSpeedMod'  = [ordered]@{ modId = 'com.abmcar.farmtogether2.farmhandspeedmod'; sourceDirectory = 'FarmhandSpeedMod' }
+    'FarmTogether2.AutoSellMod'       = [ordered]@{ modId = 'com.abmcar.farmtogether2.autosellmod'; sourceDirectory = 'FarmTogether2.AutoSellMod' }
+    'FarmTogether2.QoLMod'            = [ordered]@{ modId = 'com.abmcar.farmtogether2.qolmod'; sourceDirectory = 'FarmTogether2.QoLMod' }
+    'FarmTogether2.AutoModRangeMod'   = [ordered]@{ modId = 'com.abmcar.farmtogether2.automodrangemod'; sourceDirectory = 'FarmTogether2.AutoModRangeMod' }
+    'FarmTogether2.FarmhandSpeedMod'  = [ordered]@{ modId = 'com.abmcar.farmtogether2.farmhandspeedmod'; sourceDirectory = 'FarmTogether2.FarmhandSpeedMod' }
 }
 
 function Get-OrdinalSortedStrings {
@@ -915,6 +915,49 @@ function Add-RuntimeTarget {
     [void]$target.ModIds.Add($ModId)
 }
 
+function Add-ResolvedRuntimeMethodTarget {
+    param(
+        [Parameter(Mandatory)][string] $SourceType,
+        [Parameter(Mandatory)][string] $MemberName,
+        [AllowEmptyCollection()][string[]] $ArgumentTypes,
+        [switch] $MatchParameters,
+        [Parameter(Mandatory)][bool] $Required,
+        [Parameter(Mandatory)][string] $PluginName,
+        [Parameter(Mandatory)][string] $ModId,
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] $Targets
+    )
+
+    $type = Resolve-ContextType $Context 'Assembly-CSharp' $SourceType "Runtime target type '$SourceType' in $PluginName"
+    $candidates = @($type.Methods | Where-Object Name -CEQ $MemberName)
+    if ($MatchParameters) {
+        [string[]] $expectedArguments = [string[]]::new(0)
+        if ($null -ne $ArgumentTypes) {
+            $expectedArguments = @($ArgumentTypes)
+        }
+        $candidates = @($candidates | Where-Object {
+            if ($_.Parameters.Count -ne $expectedArguments.Count) { return $false }
+            for ($index = 0; $index -lt $expectedArguments.Count; $index++) {
+                if (-not (Test-SourceTypeMatchesCecilType $expectedArguments[$index] $_.Parameters[$index].ParameterType)) { return $false }
+            }
+            return $true
+        })
+    }
+    if ($candidates.Count -ne 1) {
+        throw "Runtime method '$SourceType.$MemberName' in $PluginName resolved to $($candidates.Count) overloads instead of exactly one."
+    }
+
+    $method = $candidates[0]
+    Add-RuntimeTarget `
+        $Targets `
+        ([string]$type.Module.Assembly.Name.Name) `
+        (ConvertTo-ContractTypeName $type) `
+        'method' `
+        (ConvertTo-MethodSignature $method) `
+        $Required `
+        $ModId
+}
+
 function Resolve-RuntimeTargets {
     param(
         [Parameter(Mandatory)][string] $Text,
@@ -942,22 +985,11 @@ function Resolve-RuntimeTargets {
             }
             $sourceType = $Matches.type.Trim()
             $memberName = $Matches.member
-            $type = Resolve-ContextType $Context 'Assembly-CSharp' $sourceType "Runtime target type '$sourceType' in $PluginName"
-            $candidates = @($type.Methods | Where-Object Name -CEQ $memberName)
 
             $argumentMatch = [regex]::Match($body, 'new\s*\[\s*\]\s*\{(?<arguments>.*?)\}', [Text.RegularExpressions.RegexOptions]::Singleline)
+            [string[]] $argumentTypes = @()
             if ($argumentMatch.Success) {
                 $argumentTypes = @([regex]::Matches($argumentMatch.Groups['arguments'].Value, 'typeof\s*\(\s*(?<type>[^\)]+)\s*\)') | ForEach-Object { $_.Groups['type'].Value.Trim() })
-                $candidates = @($candidates | Where-Object {
-                    if ($_.Parameters.Count -ne $argumentTypes.Count) { return $false }
-                    for ($index = 0; $index -lt $argumentTypes.Count; $index++) {
-                        if (-not (Test-SourceTypeMatchesCecilType $argumentTypes[$index] $_.Parameters[$index].ParameterType)) { return $false }
-                    }
-                    return $true
-                })
-            }
-            if ($candidates.Count -ne 1) {
-                throw "Runtime method '$sourceType.$memberName' in $PluginName resolved to $($candidates.Count) overloads instead of exactly one."
             }
 
             $required = if ($PluginName -eq 'FarmTogether2.AutoModRangeMod') {
@@ -969,8 +1001,79 @@ function Resolve-RuntimeTargets {
             else {
                 throw "Runtime target '$sourceType.$memberName' in $PluginName has no explicit required flag."
             }
-            $method = $candidates[0]
-            Add-RuntimeTarget $Targets ([string]$type.Module.Assembly.Name.Name) (ConvertTo-ContractTypeName $type) 'method' (ConvertTo-MethodSignature $method) $required $ModId
+            Add-ResolvedRuntimeMethodTarget `
+                -SourceType $sourceType `
+                -MemberName $memberName `
+                -ArgumentTypes $argumentTypes `
+                -MatchParameters:$argumentMatch.Success `
+                -Required $required `
+                -PluginName $PluginName `
+                -ModId $ModId `
+                -Context $Context `
+                -Targets $Targets
+        }
+    }
+
+    foreach ($call in Get-CallBodies $Text 'ResolvePatch' $codeMask) {
+        if ($call.IsDeclaration) { continue }
+        $body = $call.Body
+        $byName = [regex]::Match(
+            $body,
+            'ResolveMethodByTypeName\s*\(\s*"(?<type>[^"]+)"\s*,\s*"(?<member>[^"]+)"\s*\)',
+            [Text.RegularExpressions.RegexOptions]::Singleline)
+        $accessTools = [regex]::Match(
+            $body,
+            'AccessTools\.Method\s*\(\s*typeof\s*\(\s*(?<type>[^\)]+)\s*\)\s*,\s*(?:"(?<quoted>[^"]+)"|nameof\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\.(?<named>[A-Za-z_][A-Za-z0-9_]*)\s*\))',
+            [Text.RegularExpressions.RegexOptions]::Singleline)
+        if ($byName.Success) {
+            $sourceType = $byName.Groups['type'].Value
+            $memberName = $byName.Groups['member'].Value
+        }
+        elseif ($accessTools.Success) {
+            $sourceType = $accessTools.Groups['type'].Value.Trim()
+            $memberName = if ($accessTools.Groups['quoted'].Success) {
+                $accessTools.Groups['quoted'].Value
+            } else {
+                $accessTools.Groups['named'].Value
+            }
+        }
+        else {
+            throw "Unrecognized invocation of 'ResolvePatch' in $PluginName."
+        }
+
+        $argumentMatch = [regex]::Match($body, 'new\s*\[\s*\]\s*\{(?<arguments>.*?)\}', [Text.RegularExpressions.RegexOptions]::Singleline)
+        [string[]] $argumentTypes = if ($argumentMatch.Success) {
+            @([regex]::Matches($argumentMatch.Groups['arguments'].Value, 'typeof\s*\(\s*(?<type>[^\)]+)\s*\)') | ForEach-Object { $_.Groups['type'].Value.Trim() })
+        } else {
+            @()
+        }
+        $matchParameters = $argumentMatch.Success -or $body -match 'Type\.EmptyTypes'
+        Add-ResolvedRuntimeMethodTarget `
+            -SourceType $sourceType `
+            -MemberName $memberName `
+            -ArgumentTypes $argumentTypes `
+            -MatchParameters:$matchParameters `
+            -Required $true `
+            -PluginName $PluginName `
+            -ModId $ModId `
+            -Context $Context `
+            -Targets $Targets
+    }
+
+    foreach ($helper in @('ResolveRequiredPrefix', 'ResolveRequiredPostfix', 'HarmonyPatchSpec')) {
+        foreach ($call in Get-CallBodies $Text $helper $codeMask) {
+            if ($call.IsDeclaration) { continue }
+            if ($call.Body -cnotmatch '^\s*typeof\s*\(\s*(?<type>[^\)]+)\s*\)\s*,\s*"(?<member>[^"]+)"') {
+                throw "Unrecognized invocation of '$helper' in $PluginName."
+            }
+            Add-ResolvedRuntimeMethodTarget `
+                -SourceType $Matches.type.Trim() `
+                -MemberName $Matches.member `
+                -Required $true `
+                -PluginName $PluginName `
+                -ModId $ModId `
+                -Context $Context `
+                -Targets $Targets
         }
     }
 
@@ -1132,8 +1235,8 @@ function Export-Contract {
             Resolve-RuntimeTargets $sourceTexts[$pluginName] $pluginName $entry.ModId $context $runtimeTargets
         }
 
-        if ($directTypes.Count -ne 57) { throw "Expected 57 direct types, found $($directTypes.Count)." }
-        if ($directMembers.Count -ne 101) { throw "Expected 101 semantic metadata members before runtime targets, found $($directMembers.Count)." }
+        if ($directTypes.Count -ne 63) { throw "Expected 63 direct types, found $($directTypes.Count)." }
+        if ($directMembers.Count -ne 111) { throw "Expected 111 semantic metadata members before runtime targets, found $($directMembers.Count)." }
 
         foreach ($target in $runtimeTargets.Values | Where-Object Required) {
             $member = [ordered]@{ assembly = $target.Assembly; declaringType = $target.Type; kind = $target.Kind; signature = $target.Signature; isStatic = $false }
@@ -1148,10 +1251,10 @@ function Export-Contract {
             $key = "$($member.assembly)`u{1f}$($member.declaringType)`u{1f}$($member.signature)"
             if (-not $directMembers.ContainsKey($key)) { $directMembers[$key] = $member }
         }
-        if ($directMembers.Count -ne 110) { throw "Expected 110 direct members after required runtime targets, found $($directMembers.Count)." }
+        if ($directMembers.Count -ne 137) { throw "Expected 137 direct members after required runtime targets, found $($directMembers.Count)." }
 
         $associationCount = @($runtimeTargets.Values | ForEach-Object { $_.ModIds.Count } | Measure-Object -Sum).Sum
-        if ($runtimeTargets.Count -ne 30 -or $associationCount -ne 32) { throw "Expected 30 runtime targets and 32 mod associations, found $($runtimeTargets.Count) and $associationCount." }
+        if ($runtimeTargets.Count -ne 32 -or $associationCount -ne 35) { throw "Expected 32 runtime targets and 35 mod associations, found $($runtimeTargets.Count) and $associationCount." }
 
         $enumValues = @{}
         foreach ($enumKey in $enumDefinitions.Keys) {

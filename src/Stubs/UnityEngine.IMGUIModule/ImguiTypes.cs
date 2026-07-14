@@ -1,12 +1,12 @@
 namespace UnityEngine;
 
-public class GUISkin : ScriptableObject
+public sealed class GUISkin : ScriptableObject
 {
     public GUISkin(IntPtr pointer) : base(pointer) { }
     public GUIStyle label => throw new NotSupportedException("Compile-time reference only.");
 }
 
-public class GUIStyle : Il2CppSystem.Object
+public sealed class GUIStyle : Il2CppSystem.Object
 {
     public GUIStyle(IntPtr pointer) : base(pointer) { }
     public GUIStyle(GUIStyle other) : base(IntPtr.Zero) { }
@@ -17,7 +17,7 @@ public class GUIStyle : Il2CppSystem.Object
     public GUIStyleState normal => throw new NotSupportedException("Compile-time reference only.");
 }
 
-public class GUIStyleState : Il2CppSystem.Object
+public sealed class GUIStyleState : Il2CppSystem.Object
 {
     public GUIStyleState(IntPtr pointer) : base(pointer) { }
     public Color textColor { get; set; }
