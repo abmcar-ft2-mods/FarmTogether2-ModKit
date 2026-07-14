@@ -64,11 +64,19 @@ if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
 }
 
 if (-not $NoBuild) {
-    & dotnet build $project -c $Configuration --locked-mode
+    & dotnet restore $project --locked-mode
+    if ($LASTEXITCODE -ne 0) {
+        throw "Reference project restore failed with exit code $LASTEXITCODE."
+    }
+    & dotnet build $project -c $Configuration --no-restore
     if ($LASTEXITCODE -ne 0) {
         throw "Reference project build failed with exit code $LASTEXITCODE."
     }
-    & dotnet build $tool -c Release --locked-mode
+    & dotnet restore $tool --locked-mode
+    if ($LASTEXITCODE -ne 0) {
+        throw "ModKit tool restore failed with exit code $LASTEXITCODE."
+    }
+    & dotnet build $tool -c Release --no-restore
     if ($LASTEXITCODE -ne 0) {
         throw "ModKit tool build failed with exit code $LASTEXITCODE."
     }

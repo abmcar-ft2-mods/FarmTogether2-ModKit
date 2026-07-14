@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
@@ -104,6 +105,25 @@ public sealed class ModKitVersionTests
         Assert.False(File.Exists(fixture.DotNetLog));
     }
 
+    [Fact]
+    public void PackageBuildUsesLockedRestoresAndNoRestoreBuilds()
+    {
+        using Fixture fixture = new();
+
+        fixture.RunPack(noBuild: false).AssertSuccess();
+
+        string[][] invocations = fixture.ReadDotNetInvocations();
+        Assert.Equal(5, invocations.Length);
+        Assert.Equal(["restore", fixture.RefProjectPath, "--locked-mode"], invocations[0]);
+        Assert.Equal(
+            ["build", fixture.RefProjectPath, "-c", TestBuildConfiguration.Current, "--no-restore"],
+            invocations[1]);
+        Assert.Equal(["restore", fixture.ToolProjectPath, "--locked-mode"], invocations[2]);
+        Assert.Equal(["build", fixture.ToolProjectPath, "-c", "Release", "--no-restore"], invocations[3]);
+        Assert.Equal("run", invocations[4][0]);
+        Assert.DoesNotContain(invocations.Where(args => args[0] == "build"), args => args.Contains("--locked-mode"));
+    }
+
     private static int Count(string value, string needle)
     {
         int count = 0;
@@ -130,6 +150,7 @@ public sealed class ModKitVersionTests
         {
             DirectoryPath = Path.Combine(Path.GetTempPath(), $"modkit-version-{Guid.NewGuid():N}");
             RefProjectPath = Path.Combine(DirectoryPath, "src", "FarmTogether2.GameApi.Ref", "FarmTogether2.GameApi.Ref.csproj");
+            ToolProjectPath = Path.Combine(DirectoryPath, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj");
             StubProjectPath = Path.Combine(DirectoryPath, "src", "Stubs", "MilkstoneUnityExtensions", "MilkstoneUnityExtensions.csproj");
             ChangelogPath = Path.Combine(DirectoryPath, "CHANGELOG.md");
             LockPath = Path.Combine(DirectoryPath, "modkit.lock.json");
@@ -155,7 +176,7 @@ public sealed class ModKitVersionTests
             File.WriteAllText(ChangelogPath, "# Changelog\n\n## 1.0.0 - 2026-07-11\n\n- Initial release.\n", new UTF8Encoding(false));
             File.WriteAllText(LockPath, "{\"packageVersion\":\"1.0.0\"}\n", new UTF8Encoding(false));
             File.WriteAllText(
-                Path.Combine(DirectoryPath, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj"),
+                ToolProjectPath,
                 "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
                 new UTF8Encoding(false));
             foreach (string assembly in new[]
@@ -185,6 +206,7 @@ public sealed class ModKitVersionTests
 
         public string DirectoryPath { get; }
         public string RefProjectPath { get; }
+        public string ToolProjectPath { get; }
         public string StubProjectPath { get; }
         public string ChangelogPath { get; }
         public string LockPath { get; }
@@ -206,15 +228,16 @@ public sealed class ModKitVersionTests
             return Run(startInfo);
         }
 
-        public ProcessResult RunPack(IEnumerable<string>? extraArguments = null)
+        public ProcessResult RunPack(IEnumerable<string>? extraArguments = null, bool noBuild = true)
         {
             List<string> arguments =
             [
                 "-NoLogo", "-NoProfile", "-File", Path.Combine(DirectoryPath, "scripts", "Pack-GameApiRef.ps1"),
                 "-OutputDirectory", PackageOutput,
-                "-Configuration", TestBuildConfiguration.Current,
-                "-NoBuild"
+                "-Configuration", TestBuildConfiguration.Current
             ];
+            if (noBuild)
+                arguments.Add("-NoBuild");
             if (extraArguments is not null)
                 arguments.AddRange(extraArguments);
             ProcessStartInfo startInfo = StartInfo("pwsh", arguments);
@@ -223,6 +246,10 @@ public sealed class ModKitVersionTests
             startInfo.Environment["FAKE_DOTNET_LOG"] = DotNetLog;
             return Run(startInfo);
         }
+
+        public string[][] ReadDotNetInvocations() => File.ReadAllLines(DotNetLog)
+            .Select(line => JsonSerializer.Deserialize<string[]>(line) ?? throw new InvalidDataException("Invalid dotnet invocation log."))
+            .ToArray();
 
         public Dictionary<string, string> SnapshotFiles()
         {
@@ -253,7 +280,9 @@ public sealed class ModKitVersionTests
                 shim,
                 """
                 $ErrorActionPreference = 'Stop'
-                [IO.File]::WriteAllLines($env:FAKE_DOTNET_LOG, [string[]]$args)
+                $json = ConvertTo-Json -InputObject ([string[]]$args) -Compress
+                [IO.File]::AppendAllText($env:FAKE_DOTNET_LOG, $json + "`n", [Text.UTF8Encoding]::new($false))
+                if ($args[0] -in @('restore', 'build')) { exit 0 }
                 $outputIndex = [Array]::IndexOf($args, '--output')
                 if ($outputIndex -lt 0 -or $outputIndex + 1 -ge $args.Count) { exit 61 }
                 $output = $args[$outputIndex + 1]
