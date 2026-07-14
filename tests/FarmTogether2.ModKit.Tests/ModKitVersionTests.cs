@@ -90,8 +90,10 @@ public sealed class ModKitVersionTests
         result.AssertSuccess();
         string expected = Path.Combine(fixture.PackageOutput, "FarmTogether2.GameApi.Ref.3.4.5.nupkg");
         Assert.True(File.Exists(expected), $"Expected package was not created: {expected}");
-        Assert.Contains(expected, File.ReadAllText(fixture.DotNetLog), StringComparison.Ordinal);
-        Assert.DoesNotContain("FarmTogether2.GameApi.Ref.1.0.0.nupkg", File.ReadAllText(fixture.DotNetLog), StringComparison.Ordinal);
+        string[] arguments = Assert.Single(fixture.ReadDotNetInvocations());
+        Assert.Contains(arguments, argument => string.Equals(argument, expected, StringComparison.Ordinal));
+        Assert.DoesNotContain(arguments, argument =>
+            argument.Contains("FarmTogether2.GameApi.Ref.1.0.0.nupkg", StringComparison.Ordinal));
     }
 
     [Fact]
