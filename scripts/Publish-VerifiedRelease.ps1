@@ -30,34 +30,57 @@ function Invoke-GhJson {
     }
 }
 
-function Invoke-GhApiWithStatus {
-    param(
-        [Parameter(Mandatory)][string]$Endpoint,
-        [Parameter(Mandatory)][string]$Label
-    )
-
-    $output = @(& gh api --include --method GET $Endpoint 2>&1)
+function Get-ReleaseByTagIncludingDrafts {
+    $endpoint = "repos/$Repository/releases?per_page=100"
+    $output = @(& gh api --method GET --paginate --slurp $endpoint)
     $exitCode = $LASTEXITCODE
-    $lines = @($output | ForEach-Object { [string]$_ })
-    if ($lines.Count -eq 0) { throw "$Label returned no HTTP response." }
-    $statusMatch = [regex]::Match($lines[0], '^HTTP/\S+\s+([0-9]{3})(?:\s|$)')
-    if (-not $statusMatch.Success) { throw "$Label returned no parseable HTTP status." }
-    $status = [int]::Parse($statusMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
-    if ($status -eq 404) {
-        if ($exitCode -eq 0) { throw "$Label returned HTTP 404 with a successful process exit." }
-        return [pscustomobject]@{ Status = 404; Body = $null }
-    }
-    if ($exitCode -ne 0 -or $status -lt 200 -or $status -ge 300) {
-        throw "$Label failed with HTTP $status and exit code $exitCode."
-    }
-    $separator = [Array]::IndexOf($lines, '')
-    if ($separator -lt 0 -or $separator + 1 -ge $lines.Count) { throw "$Label returned no JSON body." }
+    if ($exitCode -ne 0) { throw "Release list failed with exit code $exitCode." }
+    if ($output.Count -eq 0) { throw 'Release list returned no JSON.' }
+
     try {
-        $body = (($lines[($separator + 1)..($lines.Count - 1)] -join "`n") | ConvertFrom-Json)
+        $document = [Text.Json.JsonDocument]::Parse(($output -join "`n"))
     } catch {
-        throw "$Label returned invalid JSON: $($_.Exception.Message)"
+        throw "Release list returned invalid JSON: $($_.Exception.Message)"
     }
-    return [pscustomobject]@{ Status = $status; Body = $body }
+
+    try {
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Array) {
+            throw 'Release list pagination root must be an array.'
+        }
+        if ($document.RootElement.GetArrayLength() -eq 0) {
+            throw 'Release list pagination returned no pages.'
+        }
+
+        $matches = [Collections.Generic.List[object]]::new()
+        foreach ($page in $document.RootElement.EnumerateArray()) {
+            if ($page.ValueKind -ne [Text.Json.JsonValueKind]::Array) {
+                throw 'Release list pagination page must be an array.'
+            }
+            foreach ($release in $page.EnumerateArray()) {
+                if ($release.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+                    throw 'Release list item must be an object.'
+                }
+                $tagProperties = @($release.EnumerateObject() | Where-Object {
+                    [string]::Equals($_.Name, 'tag_name', [StringComparison]::OrdinalIgnoreCase)
+                })
+                if ($tagProperties.Count -ne 1 -or
+                    $tagProperties[0].Name -cne 'tag_name' -or
+                    $tagProperties[0].Value.ValueKind -ne [Text.Json.JsonValueKind]::String) {
+                    throw 'Release list item has an invalid tag_name.'
+                }
+                if ($tagProperties[0].Value.GetString() -ceq $ReleaseTag) {
+                    $matches.Add(($release.GetRawText() | ConvertFrom-Json))
+                }
+            }
+        }
+    } finally {
+        $document.Dispose()
+    }
+
+    if ($matches.Count -gt 1) {
+        throw "Multiple Releases match the exact tag $ReleaseTag."
+    }
+    return $matches.Count -eq 1 ? $matches[0] : $null
 }
 
 function Invoke-GitOneLine {
@@ -262,19 +285,17 @@ $script:CandidateAssets = @(Get-CandidateAssets)
 $script:AssetNames = @($script:CandidateAssets | ForEach-Object Name)
 
 Assert-TagIdentity
-$tagEndpoint = "repos/$Repository/releases/tags/$ReleaseTag"
-$lookup = Invoke-GhApiWithStatus $tagEndpoint 'Release lookup by tag'
-if ($lookup.Status -eq 404) {
+$release = Get-ReleaseByTagIncludingDrafts
+if ($null -eq $release) {
     Assert-TagIdentity
     $assetPaths = @($script:CandidateAssets | ForEach-Object Path)
     & gh release create $ReleaseTag --repo $Repository --draft --verify-tag --generate-notes --title $ReleaseTag @assetPaths
     $createExit = $LASTEXITCODE
     if ($createExit -ne 0) { throw "Draft Release creation failed with exit code $createExit." }
-    $lookup = Invoke-GhApiWithStatus $tagEndpoint 'Created draft Release lookup by tag'
-    if ($lookup.Status -ne 200) { throw 'Created draft Release was not returned by its tag.' }
+    $release = Get-ReleaseByTagIncludingDrafts
+    if ($null -eq $release) { throw 'Created draft Release was not returned by the authenticated Release list.' }
 }
 
-$release = $lookup.Body
 $releaseId = [long]$release.id
 $wasDraft = $release.draft -is [bool] -and [bool]$release.draft
 Assert-ReleaseBaseState $release $wasDraft (-not $wasDraft) 'Existing Release'

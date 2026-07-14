@@ -642,10 +642,12 @@ public sealed class WorkflowContractTests
             "Release publisher must create missing Releases as verified drafts with generated notes.");
         Require(!publisher.Contains("gh release edit", StringComparison.Ordinal),
             "Release publisher must not publish by resolving a mutable tag name.");
-        Require(publisher.Contains("Invoke-GhApiWithStatus", StringComparison.Ordinal) &&
-                publisher.Contains("if ($status -eq 404)", StringComparison.Ordinal) &&
-                publisher.Contains("$lookup.Status -eq 404", StringComparison.Ordinal),
-            "Release publisher must enter creation only after an explicit HTTP 404.");
+        Require(publisher.Contains("Get-ReleaseByTagIncludingDrafts", StringComparison.Ordinal) &&
+                publisher.Contains("--paginate --slurp", StringComparison.Ordinal) &&
+                publisher.Contains("GetArrayLength() -eq 0", StringComparison.Ordinal) &&
+                publisher.Contains("if ($null -eq $release)", StringComparison.Ordinal) &&
+                publisher.Contains("Multiple Releases match the exact tag", StringComparison.Ordinal),
+            "Release publisher must discover draft and published Releases from the complete authenticated list and create only after no exact tag match.");
         Require(publisher.Contains("Invoke-GitOneLine @('cat-file', '-t', $tagRef)", StringComparison.Ordinal) &&
                 publisher.Contains("Invoke-GitOneLine @('rev-parse', '--verify', $tagRef)", StringComparison.Ordinal) &&
                 publisher.Contains("Invoke-GitOneLine @('rev-parse', '--verify', \"$tagRef^{}\")", StringComparison.Ordinal) &&

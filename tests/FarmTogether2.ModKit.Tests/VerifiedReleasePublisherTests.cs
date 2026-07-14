@@ -27,6 +27,8 @@ public sealed class VerifiedReleasePublisherTests
         Assert.False(state["Draft"]!.GetValue<bool>());
         Assert.True(state["Immutable"]!.GetValue<bool>());
         string log = fixture.ReadLog();
+        Assert.Contains("api\t--method\tGET\t--paginate\t--slurp\trepos/owner/repository/releases?per_page=100", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("releases/tags/", log, StringComparison.Ordinal);
         Assert.Contains("api\t--method\tPATCH\trepos/owner/repository/releases/42\t-F\tdraft=false", log, StringComparison.Ordinal);
         Assert.DoesNotContain("release\tedit", log, StringComparison.Ordinal);
         Assert.Contains("release\tverify\tv1.2.3\t--repo\towner/repository", log, StringComparison.Ordinal);
@@ -120,7 +122,7 @@ public sealed class VerifiedReleasePublisherTests
     }
 
     [Fact]
-    public void NonNotFoundLookupFailureCannotEnterCreatePath()
+    public void ReleaseListFailureCannotEnterCreatePath()
     {
         using Fixture fixture = new();
         fixture.SetState("LookupStatus", 500);
@@ -129,6 +131,73 @@ public sealed class VerifiedReleasePublisherTests
 
         result.AssertFailure("HTTP 500");
         AssertNoReleaseMutation(fixture.ReadLog());
+    }
+
+    [Fact]
+    public void DuplicateExactTagMatchesCannotEnterMutationPath()
+    {
+        using Fixture fixture = new();
+        fixture.SeedPartialDraftRelease();
+        fixture.SetState("DuplicateTagMatches", true);
+
+        ProcessResult result = fixture.Run();
+
+        result.AssertFailure("Multiple Releases match the exact tag");
+        AssertNoReleaseMutation(fixture.ReadLog());
+    }
+
+    [Theory]
+    [InlineData("invalid-json", "invalid JSON")]
+    [InlineData("empty-outer", "returned no pages")]
+    [InlineData("root-object", "pagination root must be an array")]
+    [InlineData("page-object", "pagination page must be an array")]
+    [InlineData("item-null", "item must be an object")]
+    [InlineData("missing-tag", "invalid tag_name")]
+    [InlineData("null-tag", "invalid tag_name")]
+    [InlineData("duplicate-tag-property", "invalid tag_name")]
+    [InlineData("uppercase-tag-property", "invalid tag_name")]
+    [InlineData("case-variant-tag-property", "invalid tag_name")]
+    public void MalformedReleaseListCannotEnterMutationPath(string fault, string expectedError)
+    {
+        using Fixture fixture = new();
+        fixture.SetState("ReleaseListFault", fault);
+
+        ProcessResult result = fixture.Run();
+
+        result.AssertFailure(expectedError);
+        AssertNoReleaseMutation(fixture.ReadLog());
+    }
+
+    [Fact]
+    public void ExactTagOnSecondPageIsFoundWithoutCreatingAnotherRelease()
+    {
+        using Fixture fixture = new();
+        fixture.SeedPublishedRelease();
+        fixture.SetState("MatchOnSecondPage", true);
+
+        ProcessResult result = fixture.Run();
+
+        result.AssertSuccess();
+        AssertNoReleaseMutation(fixture.ReadLog());
+    }
+
+    [Theory]
+    [InlineData("no-match", "was not returned")]
+    [InlineData("duplicate-matches", "Multiple Releases match the exact tag")]
+    [InlineData("invalid-json", "invalid JSON")]
+    public void InvalidPostCreateReleaseListCannotContinuePublication(string fault, string expectedError)
+    {
+        using Fixture fixture = new();
+        fixture.SetState("PostCreateListFault", fault);
+
+        ProcessResult result = fixture.Run();
+
+        result.AssertFailure(expectedError);
+        string log = fixture.ReadLog();
+        Assert.Equal(1, Count(log, "release\tcreate"));
+        Assert.DoesNotContain("release\tupload", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("\tPATCH\t", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("release\tverify\t", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -463,6 +532,11 @@ public sealed class VerifiedReleasePublisherTests
                 ImmutableEnabled = true,
                 ReleaseId = 42,
                 LookupStatus = 0,
+                DuplicateTagMatches = false,
+                MatchOnSecondPage = false,
+                ReleaseListFault = "",
+                PostCreateListFault = "",
+                CreateCompleted = false,
                 ReplaceIdOnPublish = false,
                 FailTagObjectGit = false,
                 FailReleaseVerify = false,
@@ -641,19 +715,6 @@ function Write-ReleaseJson {
     Get-ReleaseObject | ConvertTo-Json -Depth 10
 }
 
-function Write-Http([int]$Status, [string]$Body) {
-    $reason = if ($Status -eq 200) { 'OK' } elseif ($Status -eq 404) { 'Not Found' } else { 'Server Error' }
-    "HTTP/2.0 $Status $reason"
-    'Content-Type: application/json'
-    ''
-    $Body
-    if ($Status -lt 200 -or $Status -ge 300) {
-        [Console]::Error.WriteLine("gh: HTTP $Status")
-        exit 1
-    }
-    exit 0
-}
-
 if ($Arguments.Count -ge 1 -and $Arguments[0] -ceq 'api') {
     $endpoint = @($Arguments | Where-Object { $_ -like 'repos/*' })[-1]
     $method = 'GET'
@@ -672,13 +733,53 @@ if ($Arguments.Count -ge 1 -and $Arguments[0] -ceq 'api') {
         [ordered]@{ sha = $env:FAKE_TAG_OBJECT; object = [ordered]@{ type = 'commit'; sha = $env:FAKE_COMMIT } } | ConvertTo-Json -Depth 5 -Compress
         exit 0
     }
-    if ($endpoint -ceq 'repos/owner/repository/releases/tags/v1.2.3') {
-        if (-not $include) { throw 'Tag lookup must request the HTTP status.' }
-        if ([int]$state.LookupStatus -ne 0) {
-            Write-Http ([int]$state.LookupStatus) '{"message":"injected"}'
+    if ($endpoint -ceq 'repos/owner/repository/releases?per_page=100') {
+        if ($include -or -not ($Arguments -ccontains '--paginate') -or -not ($Arguments -ccontains '--slurp')) {
+            throw 'Release list must use authenticated pagination with slurp.'
         }
-        if (-not [bool]$state.Exists) { Write-Http 404 '{"message":"Not Found"}' }
-        Write-Http 200 ((Get-ReleaseObject | ConvertTo-Json -Depth 10 -Compress))
+        if ([int]$state.LookupStatus -ne 0) {
+            [Console]::Error.WriteLine("gh: HTTP $([int]$state.LookupStatus)")
+            exit 1
+        }
+        $fault = if ([bool]$state.CreateCompleted) {
+            [string]$state.PostCreateListFault
+        } else {
+            [string]$state.ReleaseListFault
+        }
+        if ($fault) {
+            switch ($fault) {
+                'invalid-json' { '[' }
+                'empty-outer' { '[]' }
+                'root-object' { '{}' }
+                'page-object' { '[{}]' }
+                'item-null' { '[[null]]' }
+                'missing-tag' { '[[{}]]' }
+                'null-tag' { '[[{"tag_name":null}]]' }
+                'duplicate-tag-property' { '[[{"tag_name":"v1.2.3","tag_name":"v1.2.3"}]]' }
+                'uppercase-tag-property' { '[[{"TAG_NAME":"v1.2.3"}]]' }
+                'case-variant-tag-property' { '[[{"tag_name":"v1.2.3","TAG_NAME":"other"}]]' }
+                'no-match' { '[[]]' }
+                'duplicate-matches' {
+                    $releaseJson = Get-ReleaseObject | ConvertTo-Json -Depth 10 -Compress
+                    "[[$releaseJson],[$releaseJson]]"
+                }
+                default { throw "Unsupported release list fault: $fault" }
+            }
+            exit 0
+        }
+        if (-not [bool]$state.Exists) {
+            '[[]]'
+            exit 0
+        }
+        $releaseJson = Get-ReleaseObject | ConvertTo-Json -Depth 10 -Compress
+        if ([bool]$state.DuplicateTagMatches) {
+            "[[$releaseJson],[$releaseJson]]"
+        } elseif ([bool]$state.MatchOnSecondPage) {
+            "[[{`"tag_name`":`"other`"}],[$releaseJson]]"
+        } else {
+            "[[$releaseJson]]"
+        }
+        exit 0
     }
     if ($endpoint -like 'repos/owner/repository/releases/*' -and $method -ceq 'PATCH') {
         $requestedId = [long]($endpoint -replace '^.*/', '')
@@ -709,6 +810,7 @@ if ($Arguments.Count -ge 2 -and $Arguments[0] -ceq 'release') {
             $state.Draft = $true
             $state.Immutable = $false
             $state.LookupStatus = 0
+            $state.CreateCompleted = $true
             Save-State
             exit 0
         }
