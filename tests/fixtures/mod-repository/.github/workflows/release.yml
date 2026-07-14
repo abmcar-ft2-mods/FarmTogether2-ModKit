@@ -16,8 +16,11 @@ jobs:
   publish:
     permissions:
       actions: read
+      attestations: read
       contents: write
     uses: abmcar/FarmTogether2-ModKit/.github/workflows/reusable-mod-publish.yml@0123456789abcdef0123456789abcdef01234567
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       modkit-commit: 0123456789abcdef0123456789abcdef01234567
+    secrets:
+      modkit_read_token: ${{ secrets.MODKIT_READ_TOKEN }}

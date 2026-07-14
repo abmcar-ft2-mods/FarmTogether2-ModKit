@@ -18,6 +18,9 @@ on:
       retention-days:
         required: true
         type: number
+    secrets:
+      modkit_read_token:
+        required: true
 
 permissions:
   contents: read
@@ -41,6 +44,7 @@ jobs:
         with:
           repository: abmcar/FarmTogether2-ModKit
           ref: ${{ inputs.modkit-commit }}
+          token: ${{ secrets.modkit_read_token }}
           path: .modkit/bootstrap
           persist-credentials: false
       - name: Set up locked .NET SDK
@@ -99,8 +103,12 @@ jobs:
       - name: Resolve locked ModKit package and tooling
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.modkit_read_token }}
         run: |
+          & gh auth setup-git --hostname github.com
+          if ($LASTEXITCODE -ne 0) {
+            throw "ModKit Git authentication setup failed with exit code $LASTEXITCODE."
+          }
           & '.modkit/bootstrap/scripts/Resolve-ModKit.ps1' `
             -LockFile 'modkit.lock.json' `
             -Destination '.modkit/packages' `

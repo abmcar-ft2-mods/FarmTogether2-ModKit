@@ -235,6 +235,15 @@ try {
         $pluginDll = [IO.Path]::GetFullPath($pluginDll)
         $relativePluginDll = [IO.Path]::GetRelativePath($root, $pluginDll)
         if ($relativePluginDll -eq '..' -or $relativePluginDll.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) { throw 'Plugin TargetPath escapes the repository root.' }
-        & (Join-Path $PSScriptRoot 'Install-ModPlugin.ps1') -SourceDll $pluginDll -GameDir $resolvedGame -AssemblyName $config.assemblyName
+        Assert-RegularFile $pluginDll 'Built plugin DLL'
+        $pluginPdb = [IO.Path]::ChangeExtension($pluginDll, '.pdb')
+        $relativePluginPdb = [IO.Path]::GetRelativePath($root, $pluginPdb)
+        if ($relativePluginPdb -eq '..' -or $relativePluginPdb.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) { throw 'Plugin PDB path escapes the repository root.' }
+        Assert-RegularFile $pluginPdb 'Built plugin PDB'
+        & (Join-Path $PSScriptRoot 'Install-ModPlugin.ps1') `
+            -SourceDll $pluginDll `
+            -SourcePdb $pluginPdb `
+            -GameDir $resolvedGame `
+            -AssemblyName $config.assemblyName
     }
 } finally { Pop-Location }

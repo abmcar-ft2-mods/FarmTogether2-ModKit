@@ -53,6 +53,9 @@ public sealed class RepositoryGeneratorTests
         Assert.Contains("reusable-mod-build.yml@" + Commit, ci, StringComparison.Ordinal);
         Assert.Contains("modkit-commit: " + Commit, ci, StringComparison.Ordinal);
         Assert.Contains("reusable-mod-publish.yml@" + Commit, release, StringComparison.Ordinal);
+        Assert.Contains("modkit_read_token: ${{ secrets.MODKIT_READ_TOKEN }}", ci, StringComparison.Ordinal);
+        Assert.Contains("modkit_read_token: ${{ secrets.MODKIT_READ_TOKEN }}", release, StringComparison.Ordinal);
+        Assert.Contains("attestations: read", release, StringComparison.Ordinal);
         Assert.DoesNotContain("secrets: inherit", ci + release, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("pull_request_target", ci + release, StringComparison.Ordinal);
         foreach (string line in (ci + "\n" + release).Split('\n').Where(line => line.TrimStart().StartsWith("uses:", StringComparison.Ordinal)))

@@ -42,11 +42,12 @@ public sealed class ModKitResolverTests
         Assert.Contains($"fetch --no-tags --depth=1 origin {Commit}", gitLog, StringComparison.Ordinal);
         Assert.Contains($"checkout --detach {Commit}", gitLog, StringComparison.Ordinal);
         Assert.DoesNotContain("clean -ffdx", gitLog, StringComparison.Ordinal);
+        Assert.DoesNotContain(" remote get-url origin", gitLog, StringComparison.Ordinal);
         string[] expectedProbeInvocations =
         [
             $"--no-replace-objects -C {fixture.Tooling} rev-parse HEAD",
             $"--no-replace-objects -C {fixture.Tooling} rev-parse --abbrev-ref HEAD",
-            $"--no-replace-objects -C {fixture.Tooling} remote get-url origin",
+            $"--no-replace-objects -C {fixture.Tooling} config --local --get-all remote.origin.url",
             $"--no-replace-objects -C {fixture.Tooling} status --porcelain --untracked-files=all"
         ];
         string[] firstGitInvocations = File.ReadAllLines(fixture.GitLog);
@@ -61,6 +62,47 @@ public sealed class ModKitResolverTests
         Assert.Equal(expectedProbeInvocations, secondGitInvocations[^expectedProbeInvocations.Length..]);
         Assert.All(secondGitInvocations, line => Assert.StartsWith("--no-replace-objects ", line, StringComparison.Ordinal));
         Assert.Equal(first, SnapshotTree(fixture.ModKitRoot));
+        fixture.AssertNoResolverTemporaries();
+    }
+
+    public static TheoryData<string[]> InvalidStoredRemoteUrls => new()
+    {
+        new[] { "git@github.com:abmcar/FarmTogether2-ModKit.git" },
+        new[] { "https://github.com/abmcar/FarmTogether2-ModKit.git " },
+        new[]
+        {
+            "https://github.com/abmcar/FarmTogether2-ModKit.git",
+            "https://github.com/abmcar/FarmTogether2-ModKit.git"
+        }
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidStoredRemoteUrls))]
+    public void IncorrectOrDuplicateStoredRemoteUrlIsRejectedBeforePromotion(string[] storedRemoteUrls)
+    {
+        using Fixture fixture = new();
+        Dictionary<string, string> prior = SnapshotTree(fixture.RepositoryRoot);
+
+        fixture.Run(storedRemoteUrls: storedRemoteUrls).AssertFailure("repository");
+
+        Assert.Equal(prior, SnapshotTree(fixture.RepositoryRoot));
+        Assert.DoesNotContain(
+            File.ReadAllLines(fixture.GitLog),
+            line => line.Contains(" remote get-url origin", StringComparison.Ordinal));
+        Assert.False(Directory.Exists(fixture.ModKitRoot));
+        fixture.AssertNoResolverTemporaries();
+    }
+
+    [Fact]
+    public void StoredRemoteReadFailureIsRejectedBeforePromotion()
+    {
+        using Fixture fixture = new();
+        Dictionary<string, string> prior = SnapshotTree(fixture.RepositoryRoot);
+
+        fixture.Run(storedRemoteReadFailure: true).AssertFailure("stored remote verification");
+
+        Assert.Equal(prior, SnapshotTree(fixture.RepositoryRoot));
+        Assert.False(Directory.Exists(fixture.ModKitRoot));
         fixture.AssertNoResolverTemporaries();
     }
 
@@ -475,6 +517,8 @@ public sealed class ModKitResolverTests
             bool nativeCommandErrorsStop = false,
             string? releaseDownloadReady = null,
             string? releaseDownloadBlock = null,
+            IEnumerable<string>? storedRemoteUrls = null,
+            bool storedRemoteReadFailure = false,
             IEnumerable<string>? extraArguments = null)
         {
             ProcessStartInfo startInfo = new("pwsh")
@@ -514,6 +558,9 @@ public sealed class ModKitResolverTests
             startInfo.Environment["FAKE_GIT_LOG"] = GitLog;
             startInfo.Environment["FAKE_GIT_SOURCE"] = Root;
             startInfo.Environment["FAKE_GIT_HEAD"] = fetchedHead;
+            startInfo.Environment["FAKE_GIT_STORED_REMOTE_URLS_JSON"] = JsonSerializer.Serialize(
+                storedRemoteUrls ?? new[] { "https://github.com/abmcar/FarmTogether2-ModKit.git" });
+            startInfo.Environment["FAKE_GIT_STORED_REMOTE_READ_FAIL"] = storedRemoteReadFailure ? "1" : string.Empty;
             startInfo.Environment["TMPDIR"] = ResolverTemporaryRoot;
             startInfo.Environment["TMP"] = ResolverTemporaryRoot;
             startInfo.Environment["TEMP"] = ResolverTemporaryRoot;
@@ -717,7 +764,15 @@ public sealed class ModKitResolverTests
                 }
                 if ($args -contains 'rev-parse' -and $args -contains '--abbrev-ref') { 'HEAD'; exit 0 }
                 if ($args -contains 'rev-parse') { $env:FAKE_GIT_HEAD; exit 0 }
-                if ($args -contains 'get-url') { 'https://github.com/abmcar/FarmTogether2-ModKit.git'; exit 0 }
+                if ($args -contains 'get-url') { exit 74 }
+                if ($args -contains 'config' -and $args -contains '--local' -and
+                    $args -contains '--get-all' -and $args[-1] -ceq 'remote.origin.url') {
+                    if ($env:FAKE_GIT_STORED_REMOTE_READ_FAIL) { exit 75 }
+                    $storedRemoteUrls = @($env:FAKE_GIT_STORED_REMOTE_URLS_JSON | ConvertFrom-Json)
+                    if ($storedRemoteUrls.Count -eq 0) { exit 1 }
+                    $storedRemoteUrls | ForEach-Object { [string]$_ }
+                    exit 0
+                }
                 if ($args -contains 'status') { exit 0 }
                 if ($args -contains 'clean') {
                     $root = $args[[Array]::IndexOf($args, '-C') + 1]

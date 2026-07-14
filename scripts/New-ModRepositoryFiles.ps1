@@ -361,6 +361,8 @@ jobs:
       configuration: Release
       candidate-kind: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'candidate' || 'preview' }}
       retention-days: 7
+    secrets:
+      modkit_read_token: ${{ secrets.MODKIT_READ_TOKEN }}
 '@).Replace('__COMMIT__', $commit))
     $files['.github/workflows/release.yml'] = ConvertTo-Utf8 ((@'
 name: Release
@@ -381,11 +383,14 @@ jobs:
   publish:
     permissions:
       actions: read
+      attestations: read
       contents: write
     uses: abmcar/FarmTogether2-ModKit/.github/workflows/reusable-mod-publish.yml@__COMMIT__
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       modkit-commit: __COMMIT__
+    secrets:
+      modkit_read_token: ${{ secrets.MODKIT_READ_TOKEN }}
 '@).Replace('__COMMIT__', $commit))
     $files['.github/dependabot.yml'] = ConvertTo-Utf8 @'
 version: 2

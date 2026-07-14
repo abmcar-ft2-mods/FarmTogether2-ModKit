@@ -19,3 +19,5 @@ jobs:
       configuration: Release
       candidate-kind: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'candidate' || 'preview' }}
       retention-days: 7
+    secrets:
+      modkit_read_token: ${{ secrets.MODKIT_READ_TOKEN }}

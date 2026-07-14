@@ -328,14 +328,14 @@ function Test-LiveCacheMatch(
     }
     $head = Invoke-GitProbe @('-C',$Tooling,'rev-parse','HEAD')
     $branch = Invoke-GitProbe @('-C',$Tooling,'rev-parse','--abbrev-ref','HEAD')
-    $remote = Invoke-GitProbe @('-C',$Tooling,'remote','get-url','origin')
+    $storedRemoteUrls = Invoke-GitProbe @('-C',$Tooling,'config','--local','--get-all','remote.origin.url')
     $status = Invoke-GitProbe @('-C',$Tooling,'status','--porcelain','--untracked-files=all')
-    if (-not $head.Succeeded -or -not $branch.Succeeded -or -not $remote.Succeeded -or -not $status.Succeeded) {
+    if (-not $head.Succeeded -or -not $branch.Succeeded -or -not $storedRemoteUrls.Succeeded -or -not $status.Succeeded) {
         return $false
     }
     return $head.Output.Count -eq 1 -and $head.Output[0].Trim() -ceq [string]$Lock.workflowCommit -and
         $branch.Output.Count -eq 1 -and $branch.Output[0].Trim() -ceq 'HEAD' -and
-        $remote.Output.Count -eq 1 -and $remote.Output[0].Trim() -ceq $RemoteUrl -and
+        $storedRemoteUrls.Output.Count -eq 1 -and $storedRemoteUrls.Output[0] -ceq $RemoteUrl -and
         $status.Output.Count -eq 0 -and [IO.File]::ReadAllText($Props) -ceq $PropsContent
 }
 
@@ -425,10 +425,10 @@ try {
     $null = Invoke-Git @('-C',$toolingPreparing,'checkout','--detach',$lock.workflowCommit) 'Tooling detached checkout'
     $head = @(Invoke-Git @('-C',$toolingPreparing,'rev-parse','HEAD') 'Tooling HEAD verification')
     $branch = @(Invoke-Git @('-C',$toolingPreparing,'rev-parse','--abbrev-ref','HEAD') 'Tooling detached-state verification')
-    $remote = @(Invoke-Git @('-C',$toolingPreparing,'remote','get-url','origin') 'Tooling remote verification')
+    $storedRemoteUrls = @(Invoke-Git @('-C',$toolingPreparing,'config','--local','--get-all','remote.origin.url') 'Tooling stored remote verification')
     if ($head.Count -ne 1 -or $head[0].Trim() -cne [string]$lock.workflowCommit -or
         $branch.Count -ne 1 -or $branch[0].Trim() -cne 'HEAD' -or
-        $remote.Count -ne 1 -or $remote[0].Trim() -cne $remoteUrl) {
+        $storedRemoteUrls.Count -ne 1 -or $storedRemoteUrls[0] -cne $remoteUrl) {
         throw 'Fetched tooling checkout does not match the locked detached commit and repository.'
     }
     Assert-DirectoryTreeHasNoReparsePoint $toolingPreparing 'Fetched tooling checkout'

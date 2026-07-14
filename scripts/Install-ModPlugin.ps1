@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$SourceDll,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$SourcePdb,
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$GameDir,
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$AssemblyName
 )
@@ -68,66 +69,162 @@ function Invoke-DeployOperationPoint([string]$Name) {
     if ([string]::Equals($env:FARMT2_DEPLOY_FAIL_AT, $Name, [StringComparison]::Ordinal)) { throw "Injected deployment failure at $Name." }
 }
 
+function Invoke-DeployRollbackPoint([string]$Name) {
+    if ([string]::Equals($env:FARMT2_DEPLOY_ROLLBACK_FAIL_AT, $Name, [StringComparison]::Ordinal)) { throw "Injected deployment rollback failure at $Name." }
+}
+
 if ($AssemblyName -cnotmatch '^[A-Za-z_][A-Za-z0-9_.]*$') { throw 'AssemblyName is noncanonical.' }
-$source = [IO.Path]::GetFullPath($SourceDll)
+$sourceDll = [IO.Path]::GetFullPath($SourceDll)
+$sourcePdb = [IO.Path]::GetFullPath($SourcePdb)
+$expectedSourcePdb = [IO.Path]::ChangeExtension($sourceDll, '.pdb')
+if (-not [string]::Equals($sourcePdb, $expectedSourcePdb, $script:PathComparison)) {
+    throw 'SourcePdb must be the same-name PDB next to SourceDll.'
+}
 $game = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($GameDir))
-Assert-RegularFile $source 'Plugin deployment source'
+Assert-RegularFile $sourceDll 'Plugin DLL deployment source'
+Assert-RegularFile $sourcePdb 'Plugin PDB deployment source'
 Assert-NoReparseAncestor $game 'Game directory'
 if (-not (Test-Path -LiteralPath $game -PathType Container)) { throw "Game directory does not exist: $game" }
 $destinationDirectory = Join-Path $game "BepInEx/plugins/$AssemblyName"
 Assert-NoReparseAncestor $destinationDirectory 'Plugin deployment directory'
 [IO.Directory]::CreateDirectory($destinationDirectory) | Out-Null
 Assert-NoReparseAncestor $destinationDirectory 'Plugin deployment directory'
-$target = Join-Path $destinationDirectory "$AssemblyName.dll"
-$mutex = [Threading.Mutex]::new($false, (Get-PathLockName $target))
+$targetDll = Join-Path $destinationDirectory "$AssemblyName.dll"
+$targetPdb = Join-Path $destinationDirectory "$AssemblyName.pdb"
+$mutex = [Threading.Mutex]::new($false, (Get-PathLockName $targetDll))
 $mutexAcquired = $false
 try {
     try { $mutexAcquired = $mutex.WaitOne() } catch [Threading.AbandonedMutexException] { $mutexAcquired = $true }
     if (-not $mutexAcquired) { throw 'Could not acquire the plugin deployment lock.' }
-    Assert-NoReparseAncestor $target 'Plugin deployment target'
-    $hadTarget = Test-Path -LiteralPath $target
-    $oldHash = $null
-    if ($hadTarget) {
-        Assert-RegularFile $target 'Existing plugin DLL'
-        $oldHash = Get-Sha256 $target
-    }
     $attempt = [guid]::NewGuid().ToString('N')
-    $staging = Join-Path $destinationDirectory ".$AssemblyName.dll.modkit-deploy-$attempt.preparing"
-    $backup = Join-Path $destinationDirectory ".$AssemblyName.dll.modkit-deploy-$attempt.backup"
-    $promoted = $false
+    $artifacts = @(
+        [pscustomobject]@{
+            Key = 'dll'
+            Label = 'Plugin DLL'
+            Source = $sourceDll
+            Target = $targetDll
+            Staging = Join-Path $destinationDirectory ".$AssemblyName.dll.modkit-deploy-$attempt.preparing"
+            Backup = Join-Path $destinationDirectory ".$AssemblyName.dll.modkit-deploy-$attempt.backup"
+            HadTarget = $false
+            OldHash = $null
+            NewHash = $null
+            Promoted = $false
+        },
+        [pscustomobject]@{
+            Key = 'pdb'
+            Label = 'Plugin PDB'
+            Source = $sourcePdb
+            Target = $targetPdb
+            Staging = Join-Path $destinationDirectory ".$AssemblyName.pdb.modkit-deploy-$attempt.preparing"
+            Backup = Join-Path $destinationDirectory ".$AssemblyName.pdb.modkit-deploy-$attempt.backup"
+            HadTarget = $false
+            OldHash = $null
+            NewHash = $null
+            Promoted = $false
+        }
+    )
+    foreach ($artifact in $artifacts) {
+        Assert-NoReparseAncestor $artifact.Target "$($artifact.Label) deployment target"
+        $artifact.HadTarget = Test-Path -LiteralPath $artifact.Target
+        if ($artifact.HadTarget) {
+            Assert-RegularFile $artifact.Target "Existing $($artifact.Label)"
+            $artifact.OldHash = Get-Sha256 $artifact.Target
+        }
+        foreach ($ownedPath in @($artifact.Staging, $artifact.Backup)) {
+            Assert-NoReparseAncestor $ownedPath "$($artifact.Label) transaction path"
+            if (Test-Path -LiteralPath $ownedPath) { throw "$($artifact.Label) transaction path already exists: $ownedPath" }
+        }
+    }
     $complete = $false
-    $newHash = $null
     try {
-        Copy-DurableVerifiedFile $source $staging 'Plugin DLL'
-        $newHash = Get-Sha256 $staging
-        if ($hadTarget) { Copy-DurableVerifiedFile $target $backup 'Existing plugin DLL backup' }
-        Invoke-DeployOperationPoint 'after-staging'
-        Assert-NoReparseAncestor $target 'Plugin deployment target'
-        if ($hadTarget) {
-            Assert-RegularFile $target 'Existing plugin DLL'
-            if ((Get-Sha256 $target) -cne $oldHash) { throw 'Existing plugin DLL changed before atomic replacement.' }
-        } elseif (Test-Path -LiteralPath $target) { throw 'Plugin deployment target appeared before atomic replacement.' }
-        [IO.File]::Move($staging, $target, $true)
-        $promoted = $true
-        Invoke-DeployOperationPoint 'after-promote'
-        Assert-RegularFile $target 'Promoted plugin DLL'
-        if ((Get-Sha256 $target) -cne $newHash) { throw 'Promoted plugin DLL verification failed.' }
-        $complete = $true
-        if ($hadTarget) { Invoke-OwnedFileCleanup $backup 'Plugin deployment backup' }
-    } finally {
-        if (-not $complete -and $promoted -and (Test-Path -LiteralPath $target)) {
-            Assert-RegularFile $target 'Failed plugin deployment target'
-            if ((Get-Sha256 $target) -cne $newHash) { throw 'Deployment rollback refuses to replace a target that no longer matches this attempt.' }
-            if ($hadTarget -and (Test-Path -LiteralPath $backup)) {
-                [IO.File]::Move($backup, $target, $true)
-                Assert-RegularFile $target 'Restored plugin DLL'
-                if ((Get-Sha256 $target) -cne $oldHash) { throw 'Plugin deployment rollback verification failed.' }
-            } else {
-                [IO.File]::Delete($target)
+        foreach ($artifact in $artifacts) {
+            Copy-DurableVerifiedFile $artifact.Source $artifact.Staging $artifact.Label
+            $artifact.NewHash = Get-Sha256 $artifact.Staging
+            if ($artifact.HadTarget) {
+                Copy-DurableVerifiedFile $artifact.Target $artifact.Backup "Existing $($artifact.Label) backup"
             }
         }
-        if (Test-Path -LiteralPath $staging) { Invoke-OwnedFileCleanup $staging 'Plugin deployment staging file' }
-        if (Test-Path -LiteralPath $backup) { Invoke-OwnedFileCleanup $backup 'Plugin deployment backup' }
+        Invoke-DeployOperationPoint 'after-staging'
+        foreach ($artifact in $artifacts) {
+            Assert-NoReparseAncestor $artifact.Target "$($artifact.Label) deployment target"
+            if ($artifact.HadTarget) {
+                Assert-RegularFile $artifact.Target "Existing $($artifact.Label)"
+                if ((Get-Sha256 $artifact.Target) -cne $artifact.OldHash) {
+                    throw "Existing $($artifact.Label) changed before atomic replacement."
+                }
+            } elseif (Test-Path -LiteralPath $artifact.Target) {
+                throw "$($artifact.Label) deployment target appeared before atomic replacement."
+            }
+        }
+
+        [IO.File]::Move($artifacts[0].Staging, $artifacts[0].Target, $true)
+        $artifacts[0].Promoted = $true
+        Invoke-DeployOperationPoint 'after-dll-promote'
+        Assert-RegularFile $artifacts[0].Target 'Promoted plugin DLL'
+        if ((Get-Sha256 $artifacts[0].Target) -cne $artifacts[0].NewHash) { throw 'Promoted plugin DLL verification failed.' }
+
+        [IO.File]::Move($artifacts[1].Staging, $artifacts[1].Target, $true)
+        $artifacts[1].Promoted = $true
+        Invoke-DeployOperationPoint 'after-pdb-promote'
+        Assert-RegularFile $artifacts[1].Target 'Promoted plugin PDB'
+        if ((Get-Sha256 $artifacts[1].Target) -cne $artifacts[1].NewHash) { throw 'Promoted plugin PDB verification failed.' }
+        Invoke-DeployOperationPoint 'after-promote'
+        $complete = $true
+        foreach ($artifact in $artifacts) {
+            if ($artifact.HadTarget) { Invoke-OwnedFileCleanup $artifact.Backup "$($artifact.Label) deployment backup" }
+        }
+    } finally {
+        $rollbackFailures = [Collections.Generic.List[string]]::new()
+        if (-not $complete) {
+            foreach ($artifact in @($artifacts[1], $artifacts[0])) {
+                if (-not $artifact.Promoted) { continue }
+                try {
+                    Invoke-DeployRollbackPoint "before-$($artifact.Key)-rollback"
+                    Assert-RegularFile $artifact.Target "Failed $($artifact.Label) deployment target"
+                    if ((Get-Sha256 $artifact.Target) -cne $artifact.NewHash) {
+                        throw "$($artifact.Label) rollback refuses to replace a target that no longer matches this attempt."
+                    }
+                    if ($artifact.HadTarget) {
+                        if (-not (Test-Path -LiteralPath $artifact.Backup -PathType Leaf)) {
+                            throw "$($artifact.Label) rollback backup is missing."
+                        }
+                        Assert-RegularFile $artifact.Backup "$($artifact.Label) rollback backup"
+                        [IO.File]::Move($artifact.Backup, $artifact.Target, $true)
+                        Assert-RegularFile $artifact.Target "Restored $($artifact.Label)"
+                        if ((Get-Sha256 $artifact.Target) -cne $artifact.OldHash) {
+                            throw "$($artifact.Label) rollback verification failed."
+                        }
+                    } else {
+                        [IO.File]::Delete($artifact.Target)
+                    }
+                } catch {
+                    $rollbackFailures.Add("$($artifact.Label): $($_.Exception.Message)")
+                }
+            }
+        }
+        $cleanupFailures = [Collections.Generic.List[string]]::new()
+        if ($rollbackFailures.Count -eq 0) {
+            foreach ($artifact in $artifacts) {
+                foreach ($ownedFile in @(
+                    [pscustomobject]@{ Path = $artifact.Staging; Label = "$($artifact.Label) deployment staging file" },
+                    [pscustomobject]@{ Path = $artifact.Backup; Label = "$($artifact.Label) deployment backup" }
+                )) {
+                    try {
+                        if (Test-Path -LiteralPath $ownedFile.Path) { Invoke-OwnedFileCleanup $ownedFile.Path $ownedFile.Label }
+                    } catch {
+                        $cleanupFailures.Add("$($ownedFile.Label): $($_.Exception.Message)")
+                    }
+                }
+            }
+        }
+        if ($rollbackFailures.Count -ne 0) {
+            $details = ($rollbackFailures | ForEach-Object { " - $_" }) -join [Environment]::NewLine
+            throw "Plugin deployment rollback failed after attempting every promoted artifact:$([Environment]::NewLine)$details"
+        }
+        if ($cleanupFailures.Count -ne 0) {
+            $details = ($cleanupFailures | ForEach-Object { " - $_" }) -join [Environment]::NewLine
+            throw "Plugin deployment transaction cleanup failed after attempting every owned file:$([Environment]::NewLine)$details"
+        }
     }
 } finally {
     if ($mutexAcquired) { $mutex.ReleaseMutex() }

@@ -24,7 +24,9 @@ jobs:
       contents: read
     outputs:
       tag: ${{ steps.evidence.outputs.tag }}
+      tag-object: ${{ steps.evidence.outputs.tag-object }}
       commit: ${{ steps.evidence.outputs.commit }}
+      workflow-id: ${{ steps.evidence.outputs.workflow-id }}
       run-id: ${{ steps.evidence.outputs.run-id }}
       artifact-id: ${{ steps.evidence.outputs.artifact-id }}
       artifact-name: ${{ steps.evidence.outputs.artifact-name }}
@@ -77,6 +79,11 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $tagType.Count -ne 1 -or $tagType[0].Trim() -cne 'tag') {
             throw 'Reference Release tag must be annotated.'
           }
+          $tagObject = @(& git rev-parse $tagRef)
+          if ($LASTEXITCODE -ne 0 -or $tagObject.Count -ne 1 -or $tagObject[0].Trim() -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Reference Release tag object is invalid.'
+          }
+          $tagObject = $tagObject[0].Trim()
           $commit = @(& git rev-parse "$env:REQUESTED_TAG^{}")
           if ($LASTEXITCODE -ne 0 -or $commit.Count -ne 1 -or $commit[0].Trim() -cnotmatch '^[0-9a-f]{40}$') {
             throw 'Reference Release tag did not peel to one commit.'
@@ -86,10 +93,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $commit) {
             throw 'Reference checkout is not the peeled tag commit.'
           }
-          $remote = @(& git ls-remote --tags origin $tagRef "$tagRef^{}")
-          if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 2 -or
-              @($remote | Where-Object { $_ -cmatch "^[0-9a-f]{40}`t$([regex]::Escape($tagRef))$" }).Count -ne 1 -or
-              @($remote | Where-Object { $_ -ceq "$commit`t$tagRef^{}" }).Count -ne 1) {
+          $remoteRef = @(& gh api --method GET "repos/$env:REPOSITORY/git/ref/tags/$env:REQUESTED_TAG") -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [string]$remoteRef.ref -cne $tagRef -or
+              [string]$remoteRef.object.type -cne 'tag' -or [string]$remoteRef.object.sha -cne $tagObject) {
             throw 'Remote annotated tag identity differs from the checked out tag.'
           }
           $project = [xml](Get-Content -LiteralPath 'src/FarmTogether2.GameApi.Ref/FarmTogether2.GameApi.Ref.csproj' -Raw)
@@ -114,12 +120,21 @@ jobs:
           $runId = [long]::Parse($runText, [Globalization.CultureInfo]::InvariantCulture)
           $artifactId = [long]::Parse($artifactText, [Globalization.CultureInfo]::InvariantCulture)
           if ($artifactName -cne $expectedArtifactName) { throw 'Reference artifact name differs from the tag commit.' }
+          $workflow = @(& gh api --method GET "repos/$env:REPOSITORY/actions/workflows/ci.yml") -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'Reference CI workflow query failed.' }
+          $workflow = $workflow | ConvertFrom-Json
+          if ([long]$workflow.id -le 0 -or [string]$workflow.path -cne '.github/workflows/ci.yml' -or
+              [string]$workflow.state -cne 'active') {
+            throw 'Reference CI workflow identity is invalid.'
+          }
           $run = @(& gh api --method GET "repos/$env:REPOSITORY/actions/runs/$runId") -join "`n"
           if ($LASTEXITCODE -ne 0) { throw 'Reference candidate run query failed.' }
           $run = $run | ConvertFrom-Json
           if ([long]$run.id -ne $runId -or [string]$run.event -cne 'push' -or
               [string]$run.head_branch -cne 'main' -or [string]$run.head_sha -cne $commit -or
-              [string]$run.conclusion -cne 'success') {
+              [string]$run.status -cne 'completed' -or [string]$run.conclusion -cne 'success' -or
+              [long]$run.workflow_id -ne [long]$workflow.id -or
+              [string]$run.path -cne '.github/workflows/ci.yml') {
             throw 'Reference candidate run is not a successful main push for the tag commit.'
           }
           $artifact = @(& gh api --method GET "repos/$env:REPOSITORY/actions/artifacts/$artifactId") -join "`n"
@@ -131,7 +146,9 @@ jobs:
             throw 'Reference candidate artifact metadata differs from annotated tag evidence.'
           }
           "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
+          "tag-object=$tagObject" >> $env:GITHUB_OUTPUT
           "commit=$commit" >> $env:GITHUB_OUTPUT
+          "workflow-id=$([long]$workflow.id)" >> $env:GITHUB_OUTPUT
           "run-id=$runId" >> $env:GITHUB_OUTPUT
           "artifact-id=$artifactId" >> $env:GITHUB_OUTPUT
           "artifact-name=$artifactName" >> $env:GITHUB_OUTPUT
@@ -194,6 +211,7 @@ jobs:
     runs-on: windows-2025
     permissions:
       actions: read
+      attestations: read
       contents: write
     steps:
       - name: Validate verified reference tag
@@ -229,7 +247,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ steps.request.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.verify.outputs.tag-object }}
           EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
+          EXPECTED_WORKFLOW_ID: ${{ needs.verify.outputs.workflow-id }}
           EXPECTED_RUN_ID: ${{ needs.verify.outputs.run-id }}
           EXPECTED_ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
           EXPECTED_ARTIFACT_NAME: ${{ needs.verify.outputs.artifact-name }}
@@ -241,6 +261,10 @@ jobs:
           $tagRef = "refs/tags/$env:REQUESTED_TAG"
           $tagType = @(& git cat-file -t $tagRef)
           if ($LASTEXITCODE -ne 0 -or $tagType.Count -ne 1 -or $tagType[0].Trim() -cne 'tag') { throw 'Publish reference tag is not annotated.' }
+          $tagObject = @(& git rev-parse $tagRef)
+          if ($LASTEXITCODE -ne 0 -or $tagObject.Count -ne 1 -or $tagObject[0].Trim() -cne $env:EXPECTED_TAG_OBJECT) {
+            throw 'Publish reference tag object differs from verified tag object.'
+          }
           $commit = @(& git rev-parse "$env:REQUESTED_TAG^{}")
           if ($LASTEXITCODE -ne 0 -or $commit.Count -ne 1 -or $commit[0].Trim() -cne $env:EXPECTED_COMMIT) {
             throw 'Publish reference tag differs from verified commit.'
@@ -249,10 +273,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0].Trim() -cne $env:EXPECTED_COMMIT) {
             throw 'Publish reference checkout differs from verified commit.'
           }
-          $remote = @(& git ls-remote --tags origin $tagRef "$tagRef^{}")
-          if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 2 -or
-              @($remote | Where-Object { $_ -cmatch "^[0-9a-f]{40}`t$([regex]::Escape($tagRef))$" }).Count -ne 1 -or
-              @($remote | Where-Object { $_ -ceq "$env:EXPECTED_COMMIT`t$tagRef^{}" }).Count -ne 1) {
+          $remoteRef = @(& gh api --method GET "repos/$env:REPOSITORY/git/ref/tags/$env:REQUESTED_TAG") -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [string]$remoteRef.ref -cne $tagRef -or
+              [string]$remoteRef.object.type -cne 'tag' -or [string]$remoteRef.object.sha -cne $env:EXPECTED_TAG_OBJECT) {
             throw 'Publish remote reference tag differs from verified tag.'
           }
           $project = [xml](Get-Content -LiteralPath 'src/FarmTogether2.GameApi.Ref/FarmTogether2.GameApi.Ref.csproj' -Raw)
@@ -272,10 +295,19 @@ jobs:
           if ($candidateLines.Count -ne 4 -or @(Compare-Object $expectedLines $candidateLines -CaseSensitive).Count -ne 0) {
             throw 'Publish reference evidence differs from verified evidence.'
           }
+          if ($env:EXPECTED_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$') { throw 'Verified reference CI workflow id is invalid.' }
+          $expectedWorkflowId = [long]::Parse($env:EXPECTED_WORKFLOW_ID, [Globalization.CultureInfo]::InvariantCulture)
+          $workflow = @(& gh api --method GET "repos/$env:REPOSITORY/actions/workflows/$expectedWorkflowId") -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [long]$workflow.id -ne $expectedWorkflowId -or
+              [string]$workflow.path -cne '.github/workflows/ci.yml' -or [string]$workflow.state -cne 'active') {
+            throw 'Publish reference CI workflow identity differs from verified evidence.'
+          }
           $run = @(& gh api --method GET "repos/$env:REPOSITORY/actions/runs/$env:EXPECTED_RUN_ID") -join "`n" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or [long]$run.id -ne [long]$env:EXPECTED_RUN_ID -or
               [string]$run.event -cne 'push' -or [string]$run.head_branch -cne 'main' -or
-              [string]$run.head_sha -cne $env:EXPECTED_COMMIT -or [string]$run.conclusion -cne 'success') {
+              [string]$run.head_sha -cne $env:EXPECTED_COMMIT -or [string]$run.status -cne 'completed' -or
+              [string]$run.conclusion -cne 'success' -or
+              [long]$run.workflow_id -ne $expectedWorkflowId -or [string]$run.path -cne '.github/workflows/ci.yml') {
             throw 'Publish reference run query differs from verified evidence.'
           }
           $artifact = @(& gh api --method GET "repos/$env:REPOSITORY/actions/artifacts/$env:EXPECTED_ARTIFACT_ID") -join "`n" | ConvertFrom-Json
@@ -320,61 +352,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.verify.outputs.tag-object }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          $candidateRoot = [IO.Path]::GetFullPath('artifacts/publish-candidate')
-          $candidate = Get-Content -LiteralPath (Join-Path $candidateRoot 'candidate.json') -Raw | ConvertFrom-Json
-          $assetNames = @([string]$candidate.packageAsset, [string]$candidate.checksumsAsset)
-          if ($assetNames.Count -ne 2 -or @($assetNames | Sort-Object -Unique).Count -ne 2) { throw 'Reference candidate release asset names are invalid.' }
-          $assetPaths = @($assetNames | ForEach-Object { Join-Path $candidateRoot $_ })
-          $viewOutput = @(& gh release view $env:RELEASE_TAG --repo $env:REPOSITORY --json tagName,isDraft,isPrerelease,assets 2>$null)
-          $viewExit = $LASTEXITCODE
-          if ($viewExit -ne 0) {
-            & gh release create $env:RELEASE_TAG --repo $env:REPOSITORY --draft --verify-tag --generate-notes --title $env:RELEASE_TAG @assetPaths
-            if ($LASTEXITCODE -ne 0) { throw 'Reference draft Release creation failed.' }
-            $release = @(& gh release view $env:RELEASE_TAG --repo $env:REPOSITORY --json tagName,isDraft,isPrerelease,assets) -join "`n" | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0) { throw 'Created reference draft query failed.' }
-          } else {
-            $release = ($viewOutput -join "`n") | ConvertFrom-Json
-          }
-          if ([string]$release.tagName -cne $env:RELEASE_TAG -or [bool]$release.isPrerelease) {
-            throw 'Existing reference Release identity is incompatible with stable publication.'
-          }
-          $remoteNames = @($release.assets | ForEach-Object { [string]$_.name })
-          if (@($remoteNames | Where-Object { $_ -notin $assetNames }).Count -ne 0 -or
-              @($remoteNames | Sort-Object -Unique).Count -ne $remoteNames.Count) {
-            throw 'Existing reference Release contains unexpected or duplicate assets.'
-          }
-          if (-not [bool]$release.isDraft -and @(Compare-Object ($assetNames | Sort-Object) ($remoteNames | Sort-Object) -CaseSensitive).Count -ne 0) {
-            throw 'Published reference Release is missing required assets.'
-          }
-          New-Item -ItemType Directory -Path 'artifacts/existing-release' | Out-Null
-          foreach ($name in $remoteNames) {
-            & gh release download $env:RELEASE_TAG --repo $env:REPOSITORY --pattern $name --dir 'artifacts/existing-release'
-            if ($LASTEXITCODE -ne 0) { throw "Existing reference asset download failed: $name" }
-            $candidateHash = (Get-FileHash -LiteralPath (Join-Path $candidateRoot $name) -Algorithm SHA256).Hash
-            $remoteHash = (Get-FileHash -LiteralPath (Join-Path 'artifacts/existing-release' $name) -Algorithm SHA256).Hash
-            if ($candidateHash -cne $remoteHash) { throw "Existing reference asset differs from frozen candidate: $name" }
-          }
-          if ([bool]$release.isDraft) {
-            foreach ($name in @($assetNames | Where-Object { $_ -notin $remoteNames })) {
-              & gh release upload $env:RELEASE_TAG --repo $env:REPOSITORY (Join-Path $candidateRoot $name)
-              if ($LASTEXITCODE -ne 0) { throw "Reference draft asset upload failed: $name" }
-            }
-          }
-          New-Item -ItemType Directory -Path 'artifacts/release-check' | Out-Null
-          foreach ($name in $assetNames) {
-            & gh release download $env:RELEASE_TAG --repo $env:REPOSITORY --pattern $name --dir 'artifacts/release-check'
-            if ($LASTEXITCODE -ne 0) { throw "Reference Release verification download failed: $name" }
-          }
-          & 'scripts/Test-PublishedAssets.ps1' `
-            -PublishedDirectory 'artifacts/release-check' `
+          & 'scripts/Publish-VerifiedRelease.ps1' `
+            -Repository $env:REPOSITORY `
+            -ReleaseTag $env:RELEASE_TAG `
+            -ExpectedTagObject $env:EXPECTED_TAG_OBJECT `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
             -CandidateDirectory 'artifacts/publish-candidate' `
-            -CandidateKind Reference
-          if ($LASTEXITCODE -ne 0) { throw "Remote reference assets differ from frozen candidate: $LASTEXITCODE" }
-          if ([bool]$release.isDraft) {
-            & gh release edit $env:RELEASE_TAG --repo $env:REPOSITORY --draft=false --verify-tag
-            if ($LASTEXITCODE -ne 0) { throw 'Publishing verified reference draft failed.' }
-          }
+            -CandidateKind Reference `
+            -WorkingDirectory 'artifacts/release-publication'

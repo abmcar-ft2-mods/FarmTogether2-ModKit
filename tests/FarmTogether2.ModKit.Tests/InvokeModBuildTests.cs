@@ -24,7 +24,20 @@ public sealed class InvokeModBuildTests
         Assert.DoesNotContain(commands, line => line.Contains("DeployToGame=true", StringComparison.Ordinal));
         Assert.DoesNotContain(Directory.EnumerateFiles(fixture.GameDirectory, "*", SearchOption.AllDirectories), path => path.EndsWith("Fixture.Tests.dll", StringComparison.Ordinal));
         Assert.Equal("plugin\n", File.ReadAllText(Path.Combine(fixture.GameDirectory, "BepInEx", "plugins", "Fixture", "Fixture.dll")).Replace("\r\n", "\n", StringComparison.Ordinal));
+        Assert.Equal("symbols\n", File.ReadAllText(Path.Combine(fixture.GameDirectory, "BepInEx", "plugins", "Fixture", "Fixture.pdb")).Replace("\r\n", "\n", StringComparison.Ordinal));
         Assert.Equal("guard\n", File.ReadAllText(fixture.GuardLog).Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void LocalInteropDeployRequiresTheBuiltPluginPdb()
+    {
+        using Fixture fixture = new();
+        File.Delete(fixture.BuiltPluginPdb);
+
+        fixture.Run("LocalInterop", gameDir: fixture.GameDirectory, deploy: true).AssertFailure("PDB");
+
+        string pluginDirectory = Path.Combine(fixture.GameDirectory, "BepInEx", "plugins", "Fixture");
+        Assert.False(Directory.Exists(pluginDirectory));
     }
 
     [Fact]
@@ -126,6 +139,7 @@ public sealed class InvokeModBuildTests
             SequenceLog = Path.Combine(DirectoryPath, "sequence.log");
             ReplacementMarker = Path.Combine(DirectoryPath, "replacement-runner-injected.txt");
             BuiltPlugin = Path.Combine(Repository, "src", "bin", "Fixture.dll");
+            BuiltPluginPdb = Path.Combine(Repository, "src", "bin", "Fixture.pdb");
             Directory.CreateDirectory(Path.Combine(Repository, "src"));
             Directory.CreateDirectory(Path.Combine(Repository, "tests"));
             Directory.CreateDirectory(Path.Combine(Repository, ".modkit", "tooling", ".git"));
@@ -136,6 +150,7 @@ public sealed class InvokeModBuildTests
             Directory.CreateDirectory(_realGitShimDirectory);
             Directory.CreateDirectory(Path.GetDirectoryName(BuiltPlugin)!);
             File.WriteAllText(BuiltPlugin, "plugin\n", new UTF8Encoding(false));
+            File.WriteAllText(BuiltPluginPdb, "symbols\n", new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(Repository, "src", "Fixture.csproj"), "<Project />\n", new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(Repository, "tests", "Fixture.Tests.csproj"), "<Project />\n", new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(Repository, "tests", "Guard.ps1"), "Add-Content -LiteralPath $env:FAKE_GUARD_LOG -Value guard\n", new UTF8Encoding(false));
@@ -180,6 +195,7 @@ public sealed class InvokeModBuildTests
         public string SequenceLog { get; }
         public string ReplacementMarker { get; }
         public string BuiltPlugin { get; }
+        public string BuiltPluginPdb { get; }
 
         public void ReplaceConfigValue(string oldValue, string newValue)
         {

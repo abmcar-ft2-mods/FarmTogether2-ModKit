@@ -71,6 +71,19 @@ if ($release -cnotmatch "(?m)^\s*modkit-commit\s*:\s*$escaped\s*$" -or
     $release -cnotmatch '(?m)^\s*workflow_dispatch\s*:') {
     throw 'Caller release workflow is missing tag or modkit-commit inputs.'
 }
+$modKitSecret = '(?m)^\s*modkit_read_token\s*:\s*\$\{\{\s*secrets\.MODKIT_READ_TOKEN\s*\}\}\s*$'
+if (@([regex]::Matches($ci, $modKitSecret)).Count -ne 1 -or
+    @([regex]::Matches($release, $modKitSecret)).Count -ne 1) {
+    throw 'Caller workflows must explicitly pass the one private ModKit read token.'
+}
+$modKitSecretTail = '(?s)\n    secrets:\n      modkit_read_token:\s*\$\{\{\s*secrets\.MODKIT_READ_TOKEN\s*\}\}\s*\n?\z'
+if (-not [regex]::IsMatch($ci, $modKitSecretTail) -or -not [regex]::IsMatch($release, $modKitSecretTail)) {
+    throw 'Caller workflow secret maps must contain only the private ModKit read token.'
+}
+$releasePermissionBlock = '(?m)^    permissions:\n      actions: read\n      attestations: read\n      contents: write\n    uses:'
+if (-not [regex]::IsMatch($release, $releasePermissionBlock)) {
+    throw 'Caller release workflow must grant only actions read, attestations read, and contents write.'
+}
 if ($release -match '(?im)uses\s*:\s*actions/checkout@' -and $release -notmatch '(?im)\bref\s*:\s*\$\{\{\s*inputs\.tag\s*\}\}') {
     throw 'Caller release dispatch may not check out default-branch code.'
 }
