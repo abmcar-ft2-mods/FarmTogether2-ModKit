@@ -31,6 +31,16 @@ public sealed class VerifiedReleasePublisherTests
         Assert.DoesNotContain("release\tedit", log, StringComparison.Ordinal);
         Assert.Contains("release\tverify\tv1.2.3\t--repo\towner/repository", log, StringComparison.Ordinal);
         Assert.Equal(3, Count(log, "release\tverify-asset\tv1.2.3\t"));
+        string headCommitExpression = OperatingSystem.IsWindows() ? "HEAD{commit}" : "HEAD^{commit}";
+        string[] logLines = log.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        Assert.Contains(
+            logLines,
+            line => line.StartsWith("git\t--no-replace-objects\t-C\t", StringComparison.Ordinal) &&
+                line.EndsWith($"\trev-parse\t--verify\t{headCommitExpression}", StringComparison.Ordinal));
+        Assert.Contains(
+            logLines,
+            line => line.StartsWith("git-real\t--no-replace-objects\t-C\t", StringComparison.Ordinal) &&
+                line.EndsWith("\trev-parse\t--verify\tHEAD^{commit}", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -559,7 +569,19 @@ if ($Arguments.Count -eq 3 -and $Arguments[0] -ceq 'rev-parse' -and $Arguments[1
     $env:FAKE_COMMIT
     exit 0
 }
-& $env:FAKE_REAL_GIT @Arguments
+$realArguments = @($Arguments)
+if ($IsWindows -and
+    $realArguments.Count -eq 6 -and
+    $realArguments[0] -ceq '--no-replace-objects' -and
+    $realArguments[1] -ceq '-C' -and
+    $realArguments[3] -ceq 'rev-parse' -and
+    $realArguments[4] -ceq '--verify' -and
+    $realArguments[5] -ceq 'HEAD{commit}') {
+    # cmd.exe consumes the caret before %* reaches this test double.
+    $realArguments[5] = 'HEAD^{commit}'
+}
+Add-Content -LiteralPath $env:FAKE_RELEASE_LOG -Value ("git-real`t" + ($realArguments -join "`t"))
+& $env:FAKE_REAL_GIT @realArguments
 exit $LASTEXITCODE
 """;
 
