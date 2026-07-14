@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Xml.Linq;
 using NuGet.Packaging;
 using Xunit;
@@ -28,10 +29,15 @@ public sealed class RepositoryGeneratorTests
         string props = File.ReadAllText(Path.Combine(fixture.Repository, "Directory.Build.props"));
         Assert.Contains("$(MSBuildThisFileDirectory).modkit", props, StringComparison.Ordinal);
         Assert.DoesNotContain("$(MSBuildProjectDirectory).modkit", props, StringComparison.Ordinal);
+        Assert.Contains("Condition=\"Exists('$(MSBuildThisFileDirectory).modkit\\generated\\ModKit.lock.props')\"", props, StringComparison.Ordinal);
+        Assert.Contains("Condition=\"'$(IsFarmTogether2Plugin)' == 'true'\"", props, StringComparison.Ordinal);
+        Assert.Contains("PackageReference Include=\"FarmTogether2.GameApi.Ref\"", props, StringComparison.Ordinal);
+        Assert.Contains("<ExcludeAssets Condition=\"'$(GameApiMode)' == 'LocalInterop'\">all</ExcludeAssets>", props, StringComparison.Ordinal);
         string targets = File.ReadAllText(Path.Combine(fixture.Repository, "Directory.Build.targets"));
         Assert.Contains("RejectDirectFarmTogether2Deployment", targets, StringComparison.Ordinal);
         Assert.Contains("DeployToGame", targets, StringComparison.Ordinal);
         Assert.DoesNotContain("<Copy", targets, StringComparison.Ordinal);
+        Assert.DoesNotContain("FarmTogether2.GameApi.Ref", targets, StringComparison.Ordinal);
 
         string nuget = File.ReadAllText(Path.Combine(fixture.Repository, "NuGet.config"));
         Assert.Contains("FarmTogether2.GameApi.Ref", nuget, StringComparison.Ordinal);
@@ -197,6 +203,77 @@ public sealed class RepositoryGeneratorTests
             "restore", consumer, "--configfile", configPath, "--packages", Path.Combine(fixture.DirectoryPath, "unmapped-packages"), "--no-cache", "--force-evaluate"
         ]);
         Assert.True(unmappedRestore.ExitCode != 0, $"stdout:\n{unmappedRestore.Stdout}\nstderr:\n{unmappedRestore.Stderr}");
+    }
+
+    [Fact]
+    public void GeneratedPluginReferenceKeepsOneLockAcrossHostedAndLocalInterop()
+    {
+        using Fixture fixture = new();
+        fixture.Run(includeCallerWorkflows: false).AssertSuccess();
+
+        string packageDirectory = Path.Combine(fixture.Repository, ".modkit", "packages");
+        Directory.CreateDirectory(packageDirectory);
+        _ = fixture.CreatePackage("game-api-ref", "FarmTogether2.GameApi.Ref", "GameApiMarker", packageDirectory);
+        string generated = Path.Combine(fixture.Repository, ".modkit", "generated");
+        Directory.CreateDirectory(generated);
+        File.WriteAllText(Path.Combine(generated, "ModKit.lock.props"), """
+            <Project>
+              <PropertyGroup>
+                <FarmTogether2GameApiRefVersion>1.0.0</FarmTogether2GameApiRefVersion>
+              </PropertyGroup>
+            </Project>
+            """.Replace("\r\n", "\n", StringComparison.Ordinal) + "\n", new UTF8Encoding(false));
+
+        string project = Path.Combine(fixture.Repository, "src", "Fixture", "Fixture.csproj");
+        File.WriteAllText(project, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+                <IsFarmTogether2Plugin>true</IsFarmTogether2Plugin>
+              </PropertyGroup>
+            </Project>
+            """.Replace("\r\n", "\n", StringComparison.Ordinal) + "\n", new UTF8Encoding(false));
+        string interop = Path.Combine(fixture.DirectoryPath, "interop");
+        Directory.CreateDirectory(interop);
+        string config = Path.Combine(fixture.Repository, "NuGet.config");
+        string packageCache = Path.Combine(fixture.DirectoryPath, "package-cache");
+        string lockPath = Path.Combine(Path.GetDirectoryName(project)!, "packages.lock.json");
+
+        fixture.RunDotNet([
+            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "--use-lock-file", "--force-evaluate", "-p:GameApiMode=Hosted"
+        ]).AssertSuccess();
+        byte[] hostedLock = File.ReadAllBytes(lockPath);
+        using (JsonDocument lockDocument = JsonDocument.Parse(hostedLock))
+        {
+            JsonElement lockedReference = lockDocument.RootElement
+                .GetProperty("dependencies")
+                .GetProperty("net8.0")
+                .GetProperty("FarmTogether2.GameApi.Ref");
+            Assert.Equal("Direct", lockedReference.GetProperty("type").GetString());
+            Assert.Equal("1.0.0", lockedReference.GetProperty("resolved").GetString());
+        }
+        fixture.RunDotNet([
+            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "--locked-mode", "--force-evaluate", "-p:GameApiMode=LocalInterop", $"-p:InteropDir={interop}"
+        ]).AssertSuccess();
+        Assert.Equal(hostedLock, File.ReadAllBytes(lockPath));
+
+        File.Delete(lockPath);
+        string obj = Path.Combine(Path.GetDirectoryName(project)!, "obj");
+        if (Directory.Exists(obj))
+            Directory.Delete(obj, recursive: true);
+        fixture.RunDotNet([
+            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "--use-lock-file", "--force-evaluate", "-p:GameApiMode=LocalInterop", $"-p:InteropDir={interop}"
+        ]).AssertSuccess();
+        byte[] localInteropLock = File.ReadAllBytes(lockPath);
+        Assert.Equal(hostedLock, localInteropLock);
+        fixture.RunDotNet([
+            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "--locked-mode", "--force-evaluate", "-p:GameApiMode=Hosted"
+        ]).AssertSuccess();
+        Assert.Equal(localInteropLock, File.ReadAllBytes(lockPath));
     }
 
     private static Dictionary<string, string> Snapshot(string root) => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)

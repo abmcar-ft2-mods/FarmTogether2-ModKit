@@ -540,7 +540,13 @@ if ($Arguments.Count -eq 3 -and $Arguments[0] -ceq 'cat-file' -and $Arguments[1]
     'tag'
     exit 0
 }
-if ($Arguments.Count -eq 3 -and $Arguments[0] -ceq 'rev-parse' -and $Arguments[1] -ceq '--verify' -and $Arguments[2] -like 'refs/tags/*^{}') {
+$isPeeledTag = $Arguments.Count -eq 3 -and
+    $Arguments[0] -ceq 'rev-parse' -and
+    $Arguments[1] -ceq '--verify' -and
+    $Arguments[2].StartsWith('refs/tags/', [StringComparison]::Ordinal) -and
+    ($Arguments[2].EndsWith('^{}', [StringComparison]::Ordinal) -or
+        ($IsWindows -and $Arguments[2].EndsWith('{}', [StringComparison]::Ordinal)))
+if ($isPeeledTag) {
     $env:FAKE_COMMIT
     exit 0
 }

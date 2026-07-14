@@ -245,7 +245,14 @@ $files['Directory.Build.props'] = ConvertTo-Utf8 @'
     <Deterministic>true</Deterministic>
   </PropertyGroup>
   <Import Project="$(MSBuildThisFileDirectory).modkit\generated\ModKit.lock.props"
-          Condition="'$(GameApiMode)' == 'Hosted' and Exists('$(MSBuildThisFileDirectory).modkit\generated\ModKit.lock.props')" />
+          Condition="Exists('$(MSBuildThisFileDirectory).modkit\generated\ModKit.lock.props')" />
+  <ItemGroup Condition="'$(IsFarmTogether2Plugin)' == 'true'">
+    <PackageReference Include="FarmTogether2.GameApi.Ref"
+                      Version="$(FarmTogether2GameApiRefVersion)"
+                      PrivateAssets="all">
+      <ExcludeAssets Condition="'$(GameApiMode)' == 'LocalInterop'">all</ExcludeAssets>
+    </PackageReference>
+  </ItemGroup>
   <PropertyGroup Condition="'$(GameApiMode)' == 'LocalInterop' and '$(InteropDir)' != '' and '$(GameDir)' == ''">
     <BepInExInteropDir>$([System.IO.Path]::GetFullPath('$(InteropDir)'))</BepInExInteropDir>
   </PropertyGroup>
@@ -256,7 +263,7 @@ $files['Directory.Build.props'] = ConvertTo-Utf8 @'
     <Error Condition="'$(GameApiMode)' != 'Hosted' and '$(GameApiMode)' != 'LocalInterop'" Text="GameApiMode must be Hosted or LocalInterop." />
     <Error Condition="'$(GameApiMode)' == 'Hosted' and ('$(InteropDir)' != '' or '$(GameDir)' != '')" Text="Hosted mode rejects InteropDir and GameDir." />
     <Error Condition="'$(GameApiMode)' == 'Hosted' and '$(DeployToGame)' == 'true'" Text="Hosted mode cannot deploy to a game directory." />
-    <Error Condition="'$(GameApiMode)' == 'Hosted' and '$(FarmTogether2GameApiRefVersion)' == ''" Text="Hosted mode requires the root-owned ModKit lock props." />
+    <Error Condition="'$(IsFarmTogether2Plugin)' == 'true' and '$(FarmTogether2GameApiRefVersion)' == ''" Text="Farm Together 2 plugin projects require the root-owned ModKit lock props." />
     <Error Condition="'$(GameApiMode)' == 'LocalInterop' and (('$(InteropDir)' == '' and '$(GameDir)' == '') or ('$(InteropDir)' != '' and '$(GameDir)' != ''))" Text="LocalInterop requires exactly one of InteropDir or GameDir." />
     <Error Condition="'$(GameApiMode)' == 'LocalInterop' and !Exists('$(BepInExInteropDir)')" Text="The selected BepInEx interop directory does not exist." />
     <Error Condition="'$(DeployToGame)' == 'true' and ('$(GameApiMode)' != 'LocalInterop' or '$(GameDir)' == '')" Text="DeployToGame requires LocalInterop and an explicit GameDir." />
