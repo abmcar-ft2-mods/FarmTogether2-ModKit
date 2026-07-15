@@ -365,6 +365,8 @@ foreach ($entry in @(
     Assert-NoReparseAncestor $entry.Path $entry.Label
 }
 $lock = Read-ClosedLock $lockPath
+$nugetPackages = Join-Path $modKitRoot "nuget-packages/$($lock.sha256)"
+Assert-NoReparseAncestor $nugetPackages 'Digest-keyed NuGet package cache'
 $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $initialRelease = Get-ReleaseSnapshot $lock
 
@@ -478,11 +480,13 @@ try {
     Assert-DirectoryTreeHasNoReparsePoint $toolingPreparing 'Prepared tooling checkout'
 
     $escapedSource = [Security.SecurityElement]::Escape($packages)
+    $escapedNugetPackages = [Security.SecurityElement]::Escape($nugetPackages)
     $propsContent = @"
 <Project>
   <PropertyGroup>
     <FarmTogether2GameApiRefVersion>$($lock.packageVersion)</FarmTogether2GameApiRefVersion>
     <FarmTogether2ModKitPackageSource>$escapedSource</FarmTogether2ModKitPackageSource>
+    <RestorePackagesPath>$escapedNugetPackages</RestorePackagesPath>
   </PropertyGroup>
 </Project>
 "@.Replace("`r`n", "`n")

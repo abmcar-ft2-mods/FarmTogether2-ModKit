@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 - 2026-07-14
+
+- Isolate generated mod repositories from stale packages in the global NuGet cache.
+- Preserve multiple declared test projects and guard scripts as distinct build inputs.
+
 ## 1.0.0 - 2026-07-14
 
 - Add the source-authored `FarmTogether2.GameApi.Ref` reference package.

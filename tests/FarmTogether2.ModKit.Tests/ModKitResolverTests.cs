@@ -38,6 +38,10 @@ public sealed class ModKitResolverTests
         string props = File.ReadAllText(fixture.Props);
         Assert.Contains("<FarmTogether2GameApiRefVersion>1.0.0</FarmTogether2GameApiRefVersion>", props, StringComparison.Ordinal);
         Assert.Contains(System.Security.SecurityElement.Escape(fixture.Packages), props, StringComparison.Ordinal);
+        Assert.Contains(
+            $"<RestorePackagesPath>{System.Security.SecurityElement.Escape(fixture.PackageCache)}</RestorePackagesPath>",
+            props,
+            StringComparison.Ordinal);
         string gitLog = File.ReadAllText(fixture.GitLog);
         Assert.Contains($"fetch --no-tags --depth=1 origin {Commit}", gitLog, StringComparison.Ordinal);
         Assert.Contains($"checkout --detach {Commit}", gitLog, StringComparison.Ordinal);
@@ -439,6 +443,7 @@ public sealed class ModKitResolverTests
         public string Props { get; }
         public string LockPath { get; }
         public string AssetPath { get; }
+        public string PackageCache => Path.Combine(ModKitRoot, "nuget-packages", Sha256(AssetPath));
         public string GhLog { get; }
         public string GitLog { get; }
         public string NativePreferenceMarker { get; }
@@ -649,11 +654,14 @@ public sealed class ModKitResolverTests
         {
             string escapedPackages = System.Security.SecurityElement.Escape(Packages)
                 ?? throw new InvalidOperationException("Could not XML-escape the fixture package path.");
+            string escapedPackageCache = System.Security.SecurityElement.Escape(PackageCache)
+                ?? throw new InvalidOperationException("Could not XML-escape the fixture NuGet cache path.");
             return $"""
                 <Project>
                   <PropertyGroup>
                     <FarmTogether2GameApiRefVersion>1.0.0</FarmTogether2GameApiRefVersion>
                     <FarmTogether2ModKitPackageSource>{escapedPackages}</FarmTogether2ModKitPackageSource>
+                    <RestorePackagesPath>{escapedPackageCache}</RestorePackagesPath>
                   </PropertyGroup>
                 </Project>
 

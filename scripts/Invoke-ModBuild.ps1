@@ -104,7 +104,7 @@ function Read-StringArray([Collections.Generic.Dictionary[string, Text.Json.Json
         $values.Add($item.GetString())
     }
     if (@($values | Sort-Object -Unique).Count -ne $values.Count) { throw "mod.json field $Field contains duplicate paths." }
-    return ,$values.ToArray()
+    return $values.ToArray()
 }
 
 function Read-VerifiedModConfig([string]$Path) {
@@ -168,6 +168,8 @@ if ($gameProvided) {
 }
 
 $lock = Read-ClosedLock (Join-Path $root 'modkit.lock.json')
+$nugetPackages = Join-Path $root ".modkit/nuget-packages/$($lock.sha256)"
+Assert-NoReparseAncestor $nugetPackages 'Digest-keyed NuGet package cache'
 $tooling = Join-Path $root '.modkit/tooling'
 Assert-DirectoryTree $tooling 'Locked ModKit tooling'
 $packageDirectory = Join-Path $root '.modkit/packages'
@@ -212,9 +214,10 @@ if ($null -ne $resolvedGame) { $commonProperties += "-p:GameDir=$resolvedGame" }
 
 Push-Location $root
 try {
-    Invoke-DotNet (@('restore',$pluginProject,'--locked-mode') + $commonProperties + '-p:DeployToGame=false') 'Plugin restore'
+    $restoreOptions = @('--locked-mode','--packages',$nugetPackages,'--no-cache')
+    Invoke-DotNet (@('restore',$pluginProject) + $restoreOptions + $commonProperties + '-p:DeployToGame=false') 'Plugin restore'
     foreach ($project in $testProjects) {
-        Invoke-DotNet (@('restore',$project,'--locked-mode') + $commonProperties + '-p:DeployToGame=false') 'Test project restore'
+        Invoke-DotNet (@('restore',$project) + $restoreOptions + $commonProperties + '-p:DeployToGame=false') 'Test project restore'
     }
     Invoke-DotNet (@('build',$pluginProject,'-c',$Configuration,'--no-restore') + $commonProperties + '-p:DeployToGame=false') 'Plugin build'
     foreach ($project in $testProjects) {

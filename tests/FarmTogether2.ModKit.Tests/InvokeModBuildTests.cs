@@ -72,6 +72,28 @@ public sealed class InvokeModBuildTests
     }
 
     [Fact]
+    public void MultipleTestProjectsAndGuardsRemainDistinct()
+    {
+        using Fixture fixture = new();
+        fixture.AddSecondTestProjectAndGuard();
+
+        fixture.Run("Hosted").AssertSuccess();
+
+        string[] commands = File.ReadAllLines(fixture.DotNetLog);
+        string[] restoreCommands = commands.Where(line => line.StartsWith("restore ", StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(restoreCommands);
+        Assert.All(restoreCommands, line =>
+        {
+            Assert.Contains($"--packages {fixture.PackageCache}", line, StringComparison.Ordinal);
+            Assert.Contains("--no-cache", line, StringComparison.Ordinal);
+        });
+        Assert.Equal(2, commands.Count(line => line.StartsWith("test ", StringComparison.Ordinal)));
+        Assert.Contains(commands, line => line.Contains("Fixture.Tests.csproj", StringComparison.Ordinal));
+        Assert.Contains(commands, line => line.Contains("Fixture.Second.Tests.csproj", StringComparison.Ordinal));
+        Assert.Equal("guard\nguard-two\n", File.ReadAllText(fixture.GuardLog).Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void WrongToolingHeadFailsBeforeRestore()
     {
         using Fixture fixture = new();
@@ -171,6 +193,7 @@ public sealed class InvokeModBuildTests
             string package = Path.Combine(packageDirectory, "FarmTogether2.GameApi.Ref.1.0.0.nupkg");
             File.WriteAllBytes(package, [1, 2, 3, 4]);
             string packageHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(package))).ToLowerInvariant();
+            PackageCache = Path.Combine(Repository, ".modkit", "nuget-packages", packageHash);
             File.WriteAllText(Path.Combine(Repository, "modkit.lock.json"), $$"""
                 {
                   "schemaVersion": 1,
@@ -196,6 +219,7 @@ public sealed class InvokeModBuildTests
         public string ReplacementMarker { get; }
         public string BuiltPlugin { get; }
         public string BuiltPluginPdb { get; }
+        public string PackageCache { get; }
 
         public void ReplaceConfigValue(string oldValue, string newValue)
         {
@@ -204,6 +228,21 @@ public sealed class InvokeModBuildTests
             string updated = original.Replace(oldValue, newValue, StringComparison.Ordinal);
             Assert.NotEqual(original, updated);
             File.WriteAllText(path, updated, new UTF8Encoding(false));
+        }
+
+        public void AddSecondTestProjectAndGuard()
+        {
+            File.WriteAllText(Path.Combine(Repository, "tests", "Fixture.Second.Tests.csproj"), "<Project />\n", new UTF8Encoding(false));
+            File.WriteAllText(
+                Path.Combine(Repository, "tests", "Guard.Second.ps1"),
+                "Add-Content -LiteralPath $env:FAKE_GUARD_LOG -Value guard-two\n",
+                new UTF8Encoding(false));
+            ReplaceConfigValue(
+                "\"testProjects\": [\"tests/Fixture.Tests.csproj\"]",
+                "\"testProjects\": [\"tests/Fixture.Tests.csproj\", \"tests/Fixture.Second.Tests.csproj\"]");
+            ReplaceConfigValue(
+                "\"guardScripts\": [\"tests/Guard.ps1\"]",
+                "\"guardScripts\": [\"tests/Guard.ps1\", \"tests/Guard.Second.ps1\"]");
         }
 
         public void AssertTrustedToolRunsAfterGitValidation()

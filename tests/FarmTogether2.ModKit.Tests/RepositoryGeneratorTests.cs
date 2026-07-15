@@ -214,12 +214,14 @@ public sealed class RepositoryGeneratorTests
         string packageDirectory = Path.Combine(fixture.Repository, ".modkit", "packages");
         Directory.CreateDirectory(packageDirectory);
         _ = fixture.CreatePackage("game-api-ref", "FarmTogether2.GameApi.Ref", "GameApiMarker", packageDirectory);
+        string packageCache = Path.Combine(fixture.Repository, ".modkit", "nuget-packages", new string('a', 64));
         string generated = Path.Combine(fixture.Repository, ".modkit", "generated");
         Directory.CreateDirectory(generated);
-        File.WriteAllText(Path.Combine(generated, "ModKit.lock.props"), """
+        File.WriteAllText(Path.Combine(generated, "ModKit.lock.props"), $$"""
             <Project>
               <PropertyGroup>
                 <FarmTogether2GameApiRefVersion>1.0.0</FarmTogether2GameApiRefVersion>
+                <RestorePackagesPath>{{packageCache}}</RestorePackagesPath>
               </PropertyGroup>
             </Project>
             """.Replace("\r\n", "\n", StringComparison.Ordinal) + "\n", new UTF8Encoding(false));
@@ -236,13 +238,20 @@ public sealed class RepositoryGeneratorTests
         string interop = Path.Combine(fixture.DirectoryPath, "interop");
         Directory.CreateDirectory(interop);
         string config = Path.Combine(fixture.Repository, "NuGet.config");
-        string packageCache = Path.Combine(fixture.DirectoryPath, "package-cache");
+        string ignoredGlobalCache = Path.Combine(fixture.DirectoryPath, "global-nuget-cache");
         string lockPath = Path.Combine(Path.GetDirectoryName(project)!, "packages.lock.json");
 
         fixture.RunDotNet([
-            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "restore", project, "--configfile", config, "--no-cache",
             "--use-lock-file", "--force-evaluate", "-p:GameApiMode=Hosted"
-        ]).AssertSuccess();
+        ], new Dictionary<string, string> { ["NUGET_PACKAGES"] = ignoredGlobalCache }).AssertSuccess();
+        using (JsonDocument assets = JsonDocument.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(project)!, "obj", "project.assets.json"))))
+        {
+            string restoredCache = Assert.Single(assets.RootElement.GetProperty("packageFolders").EnumerateObject()).Name;
+            Assert.Equal(
+                Path.GetFullPath(packageCache).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(restoredCache).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        }
         byte[] hostedLock = File.ReadAllBytes(lockPath);
         using (JsonDocument lockDocument = JsonDocument.Parse(hostedLock))
         {
@@ -254,7 +263,7 @@ public sealed class RepositoryGeneratorTests
             Assert.Equal("1.0.0", lockedReference.GetProperty("resolved").GetString());
         }
         fixture.RunDotNet([
-            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "restore", project, "--configfile", config, "--no-cache",
             "--locked-mode", "--force-evaluate", "-p:GameApiMode=LocalInterop", $"-p:InteropDir={interop}"
         ]).AssertSuccess();
         Assert.Equal(hostedLock, File.ReadAllBytes(lockPath));
@@ -264,13 +273,13 @@ public sealed class RepositoryGeneratorTests
         if (Directory.Exists(obj))
             Directory.Delete(obj, recursive: true);
         fixture.RunDotNet([
-            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "restore", project, "--configfile", config, "--no-cache",
             "--use-lock-file", "--force-evaluate", "-p:GameApiMode=LocalInterop", $"-p:InteropDir={interop}"
         ]).AssertSuccess();
         byte[] localInteropLock = File.ReadAllBytes(lockPath);
         Assert.Equal(hostedLock, localInteropLock);
         fixture.RunDotNet([
-            "restore", project, "--configfile", config, "--packages", packageCache, "--no-cache",
+            "restore", project, "--configfile", config, "--no-cache",
             "--locked-mode", "--force-evaluate", "-p:GameApiMode=Hosted"
         ]).AssertSuccess();
         Assert.Equal(localInteropLock, File.ReadAllBytes(lockPath));
@@ -371,7 +380,9 @@ public sealed class RepositoryGeneratorTests
             return Assert.Single(Directory.EnumerateFiles(output, packageId + ".1.0.0.nupkg"));
         }
 
-        public ProcessResult RunDotNet(IEnumerable<string> arguments) => RunProcess("dotnet", arguments);
+        public ProcessResult RunDotNet(
+            IEnumerable<string> arguments,
+            IReadOnlyDictionary<string, string>? environment = null) => RunProcess("dotnet", arguments, environment);
 
         public void Dispose()
         {
@@ -380,7 +391,10 @@ public sealed class RepositoryGeneratorTests
         }
     }
 
-    private static ProcessResult RunProcess(string fileName, IEnumerable<string> arguments)
+    private static ProcessResult RunProcess(
+        string fileName,
+        IEnumerable<string> arguments,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         ProcessStartInfo startInfo = new(fileName)
         {
@@ -390,6 +404,11 @@ public sealed class RepositoryGeneratorTests
         };
         foreach (string argument in arguments)
             startInfo.ArgumentList.Add(argument);
+        if (environment is not null)
+        {
+            foreach ((string name, string value) in environment)
+                startInfo.Environment[name] = value;
+        }
         using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {fileName}.");
         string stdout = process.StandardOutput.ReadToEnd();
         string stderr = process.StandardError.ReadToEnd();
