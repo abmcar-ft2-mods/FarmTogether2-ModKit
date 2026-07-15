@@ -209,8 +209,8 @@ $commonProperties = @(
     '-p:ContinuousIntegrationBuild=true',
     '-p:Deterministic=true'
 )
-if ($null -ne $resolvedInterop) { $commonProperties += "-p:InteropDir=$resolvedInterop" }
-if ($null -ne $resolvedGame) { $commonProperties += "-p:GameDir=$resolvedGame" }
+if ($interopProvided) { $commonProperties += "-p:InteropDir=$resolvedInterop" }
+if ($gameProvided) { $commonProperties += "-p:GameDir=$resolvedGame" }
 
 Push-Location $root
 try {

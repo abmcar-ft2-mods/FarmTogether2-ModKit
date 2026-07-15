@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <PackageId>FarmTogether2.GameApi.Ref</PackageId>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <Authors>Abmcar</Authors>
     <Description>Compile-time references for supported Farm Together 2 mod builds.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

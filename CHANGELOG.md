@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2 - 2026-07-15
+
+- Mark AutoModRange and FarmhandSpeed as compatible with Steam build `24069957` after matching its captured interop contract.
+- Keep LocalInterop `GameDir` builds from also forwarding a conflicting `InteropDir` property.
+
 ## 1.0.1 - 2026-07-14
 
 - Isolate generated mod repositories from stale packages in the global NuGet cache.

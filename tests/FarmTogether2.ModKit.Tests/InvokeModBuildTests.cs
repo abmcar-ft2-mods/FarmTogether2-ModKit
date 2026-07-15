@@ -17,6 +17,7 @@ public sealed class InvokeModBuildTests
         using Fixture fixture = new();
         fixture.Run("LocalInterop", gameDir: fixture.GameDirectory, deploy: true).AssertSuccess();
         string[] commands = File.ReadAllLines(fixture.DotNetLog);
+        Assert.All(commands, line => Assert.DoesNotContain("-p:InteropDir=", line, StringComparison.Ordinal));
         string[] testProjectCommands = commands.Where(line => line.Contains("Fixture.Tests.csproj", StringComparison.Ordinal)).ToArray();
         Assert.NotEmpty(testProjectCommands);
         Assert.All(testProjectCommands, line => Assert.Contains("DeployToGame=false", line, StringComparison.Ordinal));
