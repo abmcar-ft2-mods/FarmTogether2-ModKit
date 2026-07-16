@@ -28,6 +28,12 @@ function Invoke-Git([string[]]$Arguments, [string]$Label) {
     return $output
 }
 
+function Invoke-GitWithInput([string[]]$Arguments, [string[]]$InputLines, [string]$Label) {
+    $output = @($InputLines | & git --no-replace-objects -C $script:Root @Arguments)
+    if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE." }
+    return $output
+}
+
 function Add-Offender([string]$Path) {
     $normalized = if ([string]::IsNullOrWhiteSpace($Path)) { '<unknown>' } else { $Path.Replace('\','/') }
     $null = $script:Offenders.Add($normalized)
@@ -419,8 +425,11 @@ function Test-WorkflowYaml([string]$Text, [string]$Label) {
 }
 
 function Test-BlobText([string]$ObjectId, [string]$Path) {
-    $lines = @(Invoke-Git @('cat-file','blob',$ObjectId) "History blob $ObjectId")
-    $text = $lines -join "`n"
+    if (-not $script:BlobTexts.ContainsKey($ObjectId)) {
+        $lines = @(Invoke-Git @('cat-file','blob',$ObjectId) "History blob $ObjectId")
+        $script:BlobTexts[$ObjectId] = $lines -join "`n"
+    }
+    $text = $script:BlobTexts[$ObjectId]
     $privateRepositoryName = 'FarmTogether2' + '-Mods'
     $localPathPattern = '(?i)([A-Z]:\\Users\\|[A-Z]:\\SteamLibrary\\|/home/[A-Za-z0-9._-]+/|/Users/[A-Za-z0-9._-]+/|steamapps[\\/](?:common|compatdata)|' + [regex]::Escape($privateRepositoryName) + ')'
     if ($text -match $localPathPattern) {
@@ -438,6 +447,7 @@ $inside = @(Invoke-Git @('rev-parse','--is-inside-work-tree') 'Git repository ve
 if ($inside.Count -ne 1 -or $inside[0].Trim() -cne 'true') { throw 'RepositoryRoot is not a Git worktree.' }
 
 $script:Offenders = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:BlobTexts = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
 & git --no-replace-objects -C $script:Root diff --quiet --
 if ($LASTEXITCODE -eq 1) { Add-Offender '<dirty-tracked-worktree>' } elseif ($LASTEXITCODE -ne 0) { throw 'Tracked worktree diff failed.' }
 & git --no-replace-objects -C $script:Root diff --cached --quiet --
@@ -454,25 +464,35 @@ if (@($identities | Where-Object { $_ -match '(?i)@qq\.com$' -and $_ -notmatch '
 }
 
 $objectLines = @(Invoke-Git @('rev-list','--objects','--all') 'Complete history object listing')
-$historyObjects = 0
-$historyBlobs = 0
-$seenBlobs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-$blobSizes = [Collections.Generic.Dictionary[string, long]]::new([StringComparer]::Ordinal)
+$objectIds = [Collections.Generic.List[string]]::new()
+$objectPaths = [Collections.Generic.List[string]]::new()
 foreach ($line in $objectLines) {
     $objectMatch = [regex]::Match($line, '^([0-9a-f]{40,64})(?:\s+(.*))?$')
     if (-not $objectMatch.Success) { throw 'Git returned a noncanonical history object line.' }
-    $historyObjects++
-    $objectId = $objectMatch.Groups[1].Value
+    $objectIds.Add($objectMatch.Groups[1].Value)
     $path = if ($objectMatch.Groups[2].Success -and -not [string]::IsNullOrWhiteSpace($objectMatch.Groups[2].Value)) { $objectMatch.Groups[2].Value } else { '<history-object>' }
-    $type = @(Invoke-Git @('cat-file','-t',$objectId) "History object type $objectId")
-    if ($type.Count -ne 1) { throw 'Git returned an ambiguous history object type.' }
-    if ($type[0].Trim() -cne 'blob') { continue }
+    $objectPaths.Add($path)
+}
+$objectInfo = @(Invoke-GitWithInput @('cat-file','--batch-check=%(objectname) %(objecttype) %(objectsize)') $objectIds.ToArray() 'Complete history object inspection')
+if ($objectInfo.Count -ne $objectIds.Count) { throw 'Git returned an incomplete history object inspection.' }
+
+$historyObjects = $objectIds.Count
+$historyBlobs = 0
+$seenBlobs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$blobSizes = [Collections.Generic.Dictionary[string, long]]::new([StringComparer]::Ordinal)
+for ($index = 0; $index -lt $objectIds.Count; $index++) {
+    $objectId = $objectIds[$index]
+    $path = $objectPaths[$index]
+    $infoMatch = [regex]::Match($objectInfo[$index], '^([0-9a-f]{40,64}) (blob|tree|commit|tag) ([0-9]+)$')
+    if (-not $infoMatch.Success -or $infoMatch.Groups[1].Value -cne $objectId) {
+        throw 'Git returned a noncanonical history object inspection.'
+    }
+    if ($infoMatch.Groups[2].Value -cne 'blob') { continue }
     if (-not $seenBlobs.Add($objectId)) { continue }
     $historyBlobs++
     if (Test-ForbiddenPath $path) { Add-Offender $path }
-    $sizeOutput = @(Invoke-Git @('cat-file','-s',$objectId) "History blob size $objectId")
     $size = 0L
-    if ($sizeOutput.Count -ne 1 -or -not [long]::TryParse($sizeOutput[0].Trim(), [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$size) -or $size -lt 0) {
+    if (-not [long]::TryParse($infoMatch.Groups[3].Value, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$size)) {
         throw 'Git returned a noncanonical history blob size.'
     }
     if ($size -gt 1MB) {
