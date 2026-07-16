@@ -338,7 +338,6 @@ public sealed class WorkflowContractTests
                 bool installAuxiliarySdk =
                     path == BuildPath ||
                     path == PublishPath ||
-                    (path == CiPath && jobName == "release-benchmark") ||
                     (path == ReferenceReleasePath && jobName != "prepare");
                 ValidateSdkAndGhSteps(job, $"{path} job {jobName}", requiresSdk, installAuxiliarySdk);
                 ValidateCheckoutTokens(job, $"{path} job {jobName}");
@@ -857,11 +856,9 @@ public sealed class WorkflowContractTests
                 Require(classAssignments.Length == 0, $"Test cannot have class and method release shards: {type.FullName}.{method.Name}.");
                 Require(assignments[0] is "1" or "2" or "3" or "4" or "5" or "6", $"Test method has an unknown release shard: {type.FullName}.{method.Name}.");
                 (Type Type, string Method) key = (type, method.Name);
-                if (expected.TryGetValue(key, out string? shard))
-                {
-                    Require(assignments[0] == shard, $"Release shard changed for {type.FullName}.{method.Name}.");
-                    seen.Add(key);
-                }
+                Require(expected.TryGetValue(key, out string? shard), $"Unexpected test method release shard: {type.FullName}.{method.Name}.");
+                Require(assignments[0] == shard, $"Release shard changed for {type.FullName}.{method.Name}.");
+                seen.Add(key);
             }
         }
         Require(seenClasses.SetEquals(expectedClasses.Keys), "One or more release test classes lost their shard assignment.");
