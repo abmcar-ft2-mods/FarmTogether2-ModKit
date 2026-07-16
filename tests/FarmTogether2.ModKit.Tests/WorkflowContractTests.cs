@@ -115,6 +115,8 @@ public sealed class WorkflowContractTests
         { CiPath, "scripts/Test-Repository.ps1", "scripts/Test-Candidate.ps1", "missing leakage scan" },
         { DependabotPath, "interval: daily", "interval: weekly", "non-daily Dependabot" },
         { DependabotPath, "package-ecosystem: nuget", "package-ecosystem: npm", "extra Dependabot ecosystem" },
+        { DependabotPath, "      - /tests/fixtures/mod-repository", "      - /tests/fixtures/missing", "missing fixture SDK directory" },
+        { DependabotPath, "        group-by: dependency-name", "        group-by: update-type", "different SDK grouping" },
         { DependabotAutoMergePath, DependabotMetadata, "dependabot/fetch-metadata@main", "movable Dependabot metadata action" },
         { DependabotAutoMergePath, "user.login == 'dependabot[bot]'", "user.login == 'attacker'", "different auto-merge actor" },
         { DependabotAutoMergePath, "version-update:semver-minor", "version-update:semver-major", "major auto-merge" },
@@ -398,8 +400,27 @@ public sealed class WorkflowContractTests
             YamlMappingNode update = AsMapping(updates.Children[index], "Dependabot update");
             string ecosystem = Scalar(update, "package-ecosystem", DependabotPath);
             Require(ecosystem == expected[index], "Dependabot ecosystem or order differs.");
-            Require(Scalar(update, "directory", DependabotPath) == "/", "Dependabot directory must be repository root.");
             Require(Scalar(Mapping(update, "schedule", DependabotPath), "interval", DependabotPath) == "daily", "Dependabot must run daily.");
+
+            if (ecosystem == "dotnet-sdk")
+            {
+                Require(!TryGet(update, "directory", out _), "Dependabot SDK may not use a single directory.");
+                YamlSequenceNode directories = Sequence(update, "directories", DependabotPath);
+                Require(directories.Children.Count == 2 &&
+                        ScalarEquals(directories.Children[0], "/") &&
+                        ScalarEquals(directories.Children[1], "/tests/fixtures/mod-repository"),
+                    "Dependabot SDK directories differ.");
+                YamlMappingNode groups = Mapping(update, "groups", DependabotPath);
+                Require(groups.Children.Count == 1, "Dependabot SDK must contain exactly one group.");
+                YamlMappingNode group = Mapping(groups, "dotnet-sdk", DependabotPath);
+                Require(group.Children.Count == 1 && Scalar(group, "group-by", DependabotPath) == "dependency-name",
+                    "Dependabot SDK updates must group by dependency name.");
+            }
+            else
+            {
+                Require(!TryGet(update, "directories", out _), "Non-SDK Dependabot updates may not use multiple directories.");
+                Require(Scalar(update, "directory", DependabotPath) == "/", "Dependabot directory must be repository root.");
+            }
 
             if (ecosystem == "github-actions")
             {

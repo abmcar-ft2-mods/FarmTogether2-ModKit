@@ -15,6 +15,14 @@ public sealed class RepositoryGeneratorTests
     private static readonly string Script = Path.Combine(Root, "scripts", "New-ModRepositoryFiles.ps1");
 
     [Fact]
+    public void CommittedFixtureUsesRootSdk()
+    {
+        Assert.Equal(
+            File.ReadAllBytes(Path.Combine(Root, "global.json")),
+            File.ReadAllBytes(Path.Combine(Root, "tests", "fixtures", "mod-repository", "global.json")));
+    }
+
+    [Fact]
     public void GeneratorCreatesIdempotentRootAnchoredBuildFiles()
     {
         using Fixture fixture = new();

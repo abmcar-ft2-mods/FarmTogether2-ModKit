@@ -23,6 +23,11 @@ updates:
       - dependency-name: Il2CppInterop.Common
       - dependency-name: Il2CppInterop.Runtime
   - package-ecosystem: dotnet-sdk
-    directory: /
+    directories:
+      - /
+      - /tests/fixtures/mod-repository
     schedule:
       interval: daily
+    groups:
+      dotnet-sdk:
+        group-by: dependency-name

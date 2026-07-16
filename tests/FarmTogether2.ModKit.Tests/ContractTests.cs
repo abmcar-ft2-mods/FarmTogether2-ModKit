@@ -657,7 +657,7 @@ public sealed class ContractTests
             steamBuildId = buildId,
             aggregateSha256 = aggregate,
             assemblyMetadataSha256 = hashes,
-            assemblies = (reverseIdentities ? names.Reverse() : names).Select(x => new { name = x, version = versions[x], culture = "", publicKeyToken = "" }).ToArray()
+            assemblies = (reverseIdentities ? Enumerable.Reverse(names) : names).Select(x => new { name = x, version = versions[x], culture = "", publicKeyToken = "" }).ToArray()
         };
         File.WriteAllText(path, JsonSerializer.Serialize(snapshot), new UTF8Encoding(false));
     }
