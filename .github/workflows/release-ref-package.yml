@@ -49,20 +49,21 @@ jobs:
           if (-not $validEvent) { throw 'Reference publication accepts only its tag push or workflow_dispatch recovery.' }
           "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
       - name: Check out exact reference tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ steps.request.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
       - name: Set up locked .NET SDK
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           global-json-file: global.json
       - name: Assert exact .NET SDK
         shell: pwsh
         run: |
-          if ((dotnet --version).Trim() -cne '8.0.421') {
-            throw 'Exact .NET SDK 8.0.421 is required.'
+          $requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version
+          if ((dotnet --version).Trim() -cne $requiredVersion) {
+            throw "Exact .NET SDK $requiredVersion is required."
           }
       - name: Parse annotated reference candidate evidence
         id: evidence
@@ -227,20 +228,21 @@ jobs:
           }
           "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
       - name: Check out exact verified reference tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ steps.request.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
       - name: Set up locked .NET SDK
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           global-json-file: global.json
       - name: Assert exact .NET SDK
         shell: pwsh
         run: |
-          if ((dotnet --version).Trim() -cne '8.0.421') {
-            throw 'Exact .NET SDK 8.0.421 is required.'
+          $requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version
+          if ((dotnet --version).Trim() -cne $requiredVersion) {
+            throw "Exact .NET SDK $requiredVersion is required."
           }
       - name: Re-query frozen reference evidence
         shell: pwsh

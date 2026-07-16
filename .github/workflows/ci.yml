@@ -20,19 +20,20 @@ jobs:
       contents: read
     steps:
       - name: Check out complete repository history
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Set up locked .NET SDK
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           global-json-file: global.json
       - name: Assert exact .NET SDK
         shell: pwsh
         run: |
-          if ((dotnet --version).Trim() -cne '8.0.421') {
-            throw 'Exact .NET SDK 8.0.421 is required.'
+          $requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version
+          if ((dotnet --version).Trim() -cne $requiredVersion) {
+            throw "Exact .NET SDK $requiredVersion is required."
           }
       - name: Restore locked dependencies
         shell: pwsh
@@ -146,7 +147,7 @@ jobs:
       - name: Upload main reference candidate
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         id: candidate
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: FarmTogether2.GameApi.Ref-candidate-${{ github.sha }}
           path: artifacts/ref-candidate/*

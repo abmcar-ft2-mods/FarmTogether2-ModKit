@@ -8,26 +8,28 @@ namespace FarmTogether2.ModKit.Tests;
 
 public sealed class WorkflowContractTests
 {
-    private const string Checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5";
-    private const string SetupDotNet = "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9";
-    private const string UploadArtifact = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02";
     private const string DownloadArtifact = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
     private const string CiPath = ".github/workflows/ci.yml";
     private const string ReferenceReleasePath = ".github/workflows/release-ref-package.yml";
     private const string BuildPath = ".github/workflows/reusable-mod-build.yml";
     private const string PublishPath = ".github/workflows/reusable-mod-publish.yml";
+    private const string DependabotAutoMergePath = ".github/workflows/dependabot-auto-merge.yml";
     private const string ReleasePublisherPath = "scripts/Publish-VerifiedRelease.ps1";
     private const string DependabotPath = ".github/dependabot.yml";
     private const string CallerCiPath = "tests/fixtures/mod-repository/.github/workflows/ci.yml";
     private const string CallerReleasePath = "tests/fixtures/mod-repository/.github/workflows/release.yml";
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
+    private static readonly string Checkout = ReadPinnedAction(CiPath, "actions/checkout");
+    private static readonly string SetupDotNet = ReadPinnedAction(CiPath, "actions/setup-dotnet");
+    private static readonly string UploadArtifact = ReadPinnedAction(CiPath, "actions/upload-artifact");
+    private static readonly string DependabotMetadata = ReadPinnedAction(DependabotAutoMergePath, "dependabot/fetch-metadata");
 
     public static TheoryData<string, string, string, string> RejectedMutations => new()
     {
         { CiPath, Checkout, "actions/checkout@main", "movable official action" },
         { CiPath, "runs-on: windows-2025", "runs-on: windows-latest", "mutable runner" },
         { CiPath, "global-json-file: global.json", "global-json-file: missing.json", "different global.json" },
-        { CiPath, "'8.0.421'", "'8.0.422'", "different SDK assertion" },
+        { CiPath, "Get-Content -LiteralPath 'global.json'", "Get-Content -LiteralPath 'missing.json'", "different SDK assertion source" },
         { CiPath, "cancel-in-progress: false", "cancel-in-progress: true", "cancelling concurrency" },
         { CiPath, "  pull_request:", "  pull_request_target:", "privileged pull request trigger" },
         { CiPath, "  pull_request:", "  \"pull_request_target\":", "quoted privileged pull request trigger" },
@@ -111,8 +113,11 @@ public sealed class WorkflowContractTests
         { CiPath, "      - name: Validate generated caller workflows\n        shell: pwsh", "      - name: Validate generated caller workflows\n        shell: bash", "caller workflow validation shell" },
         { CiPath, "      - name: Check repository diff and leakage policy", "      - name: Duplicate caller workflow validation\n        shell: pwsh\n        run: |\n          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n      - name: Check repository diff and leakage policy", "duplicate caller workflow validation" },
         { CiPath, "scripts/Test-Repository.ps1", "scripts/Test-Candidate.ps1", "missing leakage scan" },
-        { DependabotPath, "interval: weekly", "interval: daily", "non-weekly Dependabot" },
+        { DependabotPath, "interval: daily", "interval: weekly", "non-daily Dependabot" },
         { DependabotPath, "package-ecosystem: nuget", "package-ecosystem: npm", "extra Dependabot ecosystem" },
+        { DependabotAutoMergePath, DependabotMetadata, "dependabot/fetch-metadata@main", "movable Dependabot metadata action" },
+        { DependabotAutoMergePath, "user.login == 'dependabot[bot]'", "user.login == 'attacker'", "different auto-merge actor" },
+        { DependabotAutoMergePath, "version-update:semver-minor", "version-update:semver-major", "major auto-merge" },
         { CallerCiPath, "@0123456789abcdef0123456789abcdef01234567", "@main", "movable caller workflow" },
         { CallerCiPath, "github.ref == 'refs/heads/main'", "github.ref != ''", "caller candidate ref weakened" },
         { CallerReleasePath, "modkit-commit: 0123456789abcdef0123456789abcdef01234567", "modkit-commit: fedcba9876543210fedcba9876543210fedcba98", "caller lock mismatch" }
@@ -244,7 +249,7 @@ public sealed class WorkflowContractTests
 
     private static IReadOnlyDictionary<string, string> LoadFiles()
     {
-        string[] paths = [CiPath, ReferenceReleasePath, BuildPath, PublishPath, DependabotPath, CallerCiPath, CallerReleasePath];
+        string[] paths = [CiPath, ReferenceReleasePath, BuildPath, PublishPath, DependabotAutoMergePath, DependabotPath, CallerCiPath, CallerReleasePath];
         Dictionary<string, string> files = new(StringComparer.Ordinal);
         foreach (string relativePath in paths)
         {
@@ -266,6 +271,7 @@ public sealed class WorkflowContractTests
 
         ValidateGlobalSafety(files, documents);
         ValidateDependabot(documents[DependabotPath]);
+        ValidateDependabotAutoMerge(documents[DependabotAutoMergePath]);
         ValidateCi(files[CiPath], documents[CiPath]);
         ValidateBootstrapWorkflow(files[BuildPath]);
         ValidateModPublish(files[PublishPath]);
@@ -277,12 +283,12 @@ public sealed class WorkflowContractTests
         IReadOnlyDictionary<string, string> files,
         IReadOnlyDictionary<string, YamlMappingNode> documents)
     {
-        HashSet<string> officialActions = [Checkout, SetupDotNet, UploadArtifact, DownloadArtifact];
+        HashSet<string> officialActions = [Checkout, SetupDotNet, UploadArtifact, DownloadArtifact, DependabotMetadata];
         foreach ((string path, string text) in files)
         {
             YamlMappingNode document = documents[path];
             if (TryGet(document, "on", out YamlNode? triggers))
-                Require(!ContainsScalar(triggers!, "pull_request_target"), $"{path} uses pull_request_target.");
+                Require(!ContainsScalar(triggers!, "pull_request_target") || path == DependabotAutoMergePath, $"{path} uses pull_request_target.");
             Require(!ContainsMappingEntry(document, "secrets", "inherit"), $"{path} inherits secrets.");
             Require(!Regex.IsMatch(text, @"(?i)\bgh\s+run\s+download\b"), $"{path} uses gh run download.");
             Require(!Regex.IsMatch(text, @"(?i)Expand-Archive|\b7z(?:\.exe)?\b"), $"{path} manually extracts candidate evidence.");
@@ -375,22 +381,82 @@ public sealed class WorkflowContractTests
         Require(setupIndex >= 0 && setupIndex + 1 < steps.Children.Count, $"{label} lacks setup-dotnet and an immediate assertion.");
         YamlMappingNode assertion = AsMapping(steps.Children[setupIndex + 1], $"{label} SDK assertion");
         string assertionScript = Scalar(assertion, "run", label);
-        Require(Regex.IsMatch(assertionScript, @"\(dotnet --version\)\.Trim\(\) -cne '8\.0\.421'", RegexOptions.CultureInvariant), $"{label} lacks exact SDK assertion.");
+        Require(assertionScript.Contains("$requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version", StringComparison.Ordinal) &&
+                Regex.IsMatch(assertionScript, @"\(dotnet --version\)\.Trim\(\) -cne \$requiredVersion", RegexOptions.CultureInvariant) &&
+                assertionScript.Contains("Exact .NET SDK $requiredVersion is required.", StringComparison.Ordinal),
+            $"{label} lacks a global.json-bound SDK assertion.");
     }
 
     private static void ValidateDependabot(YamlMappingNode root)
     {
         Require(Scalar(root, "version", DependabotPath) == "2", "Dependabot version must be 2.");
         YamlSequenceNode updates = Sequence(root, "updates", DependabotPath);
-        Require(updates.Children.Count == 2, "Dependabot must contain exactly two ecosystems.");
-        string[] expected = ["github-actions", "nuget"];
+        Require(updates.Children.Count == 3, "Dependabot must contain exactly three ecosystems.");
+        string[] expected = ["github-actions", "nuget", "dotnet-sdk"];
         for (int index = 0; index < updates.Children.Count; index++)
         {
             YamlMappingNode update = AsMapping(updates.Children[index], "Dependabot update");
-            Require(Scalar(update, "package-ecosystem", DependabotPath) == expected[index], "Dependabot ecosystem or order differs.");
+            string ecosystem = Scalar(update, "package-ecosystem", DependabotPath);
+            Require(ecosystem == expected[index], "Dependabot ecosystem or order differs.");
             Require(Scalar(update, "directory", DependabotPath) == "/", "Dependabot directory must be repository root.");
-            Require(Scalar(Mapping(update, "schedule", DependabotPath), "interval", DependabotPath) == "weekly", "Dependabot must run weekly.");
+            Require(Scalar(Mapping(update, "schedule", DependabotPath), "interval", DependabotPath) == "daily", "Dependabot must run daily.");
+
+            if (ecosystem == "github-actions")
+            {
+                YamlSequenceNode patterns = Sequence(Mapping(Mapping(update, "groups", DependabotPath), "github-actions", DependabotPath), "patterns", DependabotPath);
+                Require(patterns.Children.Count == 1 && ScalarEquals(patterns.Children[0], "*"), "GitHub Actions must update as one group.");
+            }
+            else if (ecosystem == "nuget")
+            {
+                YamlSequenceNode patterns = Sequence(Mapping(Mapping(update, "groups", DependabotPath), "test-tooling", DependabotPath), "patterns", DependabotPath);
+                HashSet<string?> expectedPatterns = ["Microsoft.NET.Test.Sdk", "xunit*", "YamlDotNet"];
+                Require(patterns.Children.Count == expectedPatterns.Count &&
+                        patterns.Children.All(pattern => pattern is YamlScalarNode scalar && expectedPatterns.Contains(scalar.Value)),
+                    "NuGet test tooling group differs.");
+
+                YamlSequenceNode ignored = Sequence(update, "ignore", DependabotPath);
+                HashSet<string> ignoredNames = ignored.Children
+                    .Select((entry, ignoredIndex) => Scalar(AsMapping(entry, $"Dependabot ignore {ignoredIndex}"), "dependency-name", DependabotPath))
+                    .ToHashSet(StringComparer.Ordinal);
+                Require(ignoredNames.SetEquals(["Il2CppInterop.Common", "Il2CppInterop.Runtime"]), "Dependabot must preserve the host-matched Il2CppInterop pins.");
+            }
         }
+    }
+
+    private static void ValidateDependabotAutoMerge(YamlMappingNode root)
+    {
+        RequirePermissions(root, new Dictionary<string, string>
+        {
+            ["contents"] = "write",
+            ["pull-requests"] = "write"
+        }, DependabotAutoMergePath);
+        YamlMappingNode triggers = Mapping(root, "on", DependabotAutoMergePath);
+        Require(triggers.Children.Count == 1, "Dependabot auto-merge must have one trigger.");
+        YamlSequenceNode types = Sequence(Mapping(triggers, "pull_request_target", DependabotAutoMergePath), "types", DependabotAutoMergePath);
+        Require(types.Children.Count == 3 && new[] { "opened", "synchronize", "reopened" }.All(expected => types.Children.Any(type => ScalarEquals(type, expected))),
+            "Dependabot auto-merge trigger types differ.");
+
+        YamlMappingNode jobs = Mapping(root, "jobs", DependabotAutoMergePath);
+        Require(jobs.Children.Count == 1, "Dependabot auto-merge must have one job.");
+        YamlMappingNode job = Mapping(jobs, "enable-auto-merge", DependabotAutoMergePath);
+        Require(Scalar(job, "runs-on", DependabotAutoMergePath) == "ubuntu-latest", "Dependabot auto-merge runner differs.");
+        Require(Scalar(job, "if", DependabotAutoMergePath) == "github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar/FarmTogether2-ModKit'",
+            "Dependabot auto-merge actor or repository guard differs.");
+
+        YamlSequenceNode steps = Sequence(job, "steps", DependabotAutoMergePath);
+        Require(steps.Children.Count == 2, "Dependabot auto-merge must have two steps.");
+        YamlMappingNode metadata = AsMapping(steps.Children[0], "Dependabot metadata step");
+        Require(Scalar(metadata, "id", DependabotAutoMergePath) == "dependabot" && Scalar(metadata, "uses", DependabotAutoMergePath) == DependabotMetadata,
+            "Dependabot metadata step differs.");
+        YamlMappingNode merge = AsMapping(steps.Children[1], "Dependabot merge step");
+        Require(Scalar(merge, "if", DependabotAutoMergePath) ==
+                "steps.dependabot.outputs.update-type == 'version-update:semver-patch' || steps.dependabot.outputs.update-type == 'version-update:semver-minor'",
+            "Dependabot auto-merge must accept only patch and minor updates.");
+        Require(Scalar(merge, "run", DependabotAutoMergePath) == "gh pr merge --auto --squash \"$PR_URL\"", "Dependabot auto-merge command differs.");
+        YamlMappingNode env = Mapping(merge, "env", DependabotAutoMergePath);
+        Require(env.Children.Count == 2 && Scalar(env, "GH_TOKEN", DependabotAutoMergePath) == "${{ github.token }}" &&
+                Scalar(env, "PR_URL", DependabotAutoMergePath) == "${{ github.event.pull_request.html_url }}",
+            "Dependabot auto-merge environment differs.");
     }
 
     private static void ValidateCi(string text, YamlMappingNode root)
@@ -787,6 +853,19 @@ public sealed class WorkflowContractTests
             Require(index >= 0, $"Required ordered workflow token is missing or out of order: {token}");
             cursor = index;
         }
+    }
+
+    private static string ReadPinnedAction(string workflowPath, string action)
+    {
+        string path = Path.Combine(Root, workflowPath.Replace('/', Path.DirectorySeparatorChar));
+        string pattern = $@"(?im)^\s*(?:-\s*)?uses\s*:\s*({Regex.Escape(action)}@[0-9a-f]{{40}})\s*$";
+        string[] matches = Regex.Matches(File.ReadAllText(path), pattern, RegexOptions.CultureInvariant)
+            .Select(match => match.Groups[1].Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (matches.Length != 1)
+            throw new InvalidDataException($"{workflowPath} must contain one pinned {action} version.");
+        return matches[0];
     }
 
     private static YamlMappingNode ParseYaml(string text, string label)

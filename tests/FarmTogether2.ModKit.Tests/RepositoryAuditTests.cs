@@ -92,6 +92,22 @@ public sealed class RepositoryAuditTests
         fixture.Audit().AssertSuccess();
     }
 
+    [Fact]
+    public void DependabotAutoMergeAllowsOnlyTheReviewedWorkflowShape()
+    {
+        using Fixture fixture = new();
+        string relativePath = ".github/workflows/dependabot-auto-merge.yml";
+        string workflow = File.ReadAllText(Path.Combine(Root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        fixture.CommitFile(relativePath, Encoding.UTF8.GetBytes(workflow), "safe Dependabot auto-merge");
+        fixture.Audit().AssertSuccess();
+
+        fixture.CommitFile(
+            relativePath,
+            Encoding.UTF8.GetBytes(workflow.Replace("version-update:semver-minor", "version-update:semver-major", StringComparison.Ordinal)),
+            "unsafe Dependabot auto-merge");
+        fixture.Audit().AssertFailure(relativePath);
+    }
+
     [Theory]
     [MemberData(nameof(PullRequestTargetDocuments))]
     public void PullRequestTargetIsRejectedInEverySupportedEventShape(string label, string workflow)

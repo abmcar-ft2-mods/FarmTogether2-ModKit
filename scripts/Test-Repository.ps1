@@ -355,11 +355,47 @@ function Test-YamlNodeContainment([object]$Node, [string]$Expected) {
     return $false
 }
 
+function Test-DependabotAutoMergeWorkflow([string]$Text) {
+    $normalized = [regex]::Replace(
+        $Text,
+        '(?m)^(?<prefix>\s*uses:\s*dependabot/fetch-metadata)@[0-9a-f]{40}\s*$',
+        '${prefix}@__PIN__')
+    $expected = @'
+name: Dependabot auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar/FarmTogether2-ModKit'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read Dependabot metadata
+        id: dependabot
+        uses: dependabot/fetch-metadata@__PIN__
+      - name: Enable auto-merge for patch and minor updates
+        if: steps.dependabot.outputs.update-type == 'version-update:semver-patch' || steps.dependabot.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"
+'@
+    return [string]::Equals($normalized.TrimEnd("`n"), $expected.TrimEnd("`n"), [StringComparison]::Ordinal)
+}
+
 function Test-WorkflowYaml([string]$Text, [string]$Label) {
     try { $root = Read-WorkflowYamlAst $Text $Label } catch { return $false }
     foreach ($entry in $root.Value) {
-        if ($entry.Key -ceq 'on' -and (($entry.Value.Kind -ceq 'BlockScalar') -or (Test-YamlNodeContainment $entry.Value 'pull_request_target'))) {
-            return $false
+        if ($entry.Key -ceq 'on') {
+            if ($entry.Value.Kind -ceq 'BlockScalar') { return $false }
+            if ((Test-YamlNodeContainment $entry.Value 'pull_request_target') -and
+                ($Label -cne '.github/workflows/dependabot-auto-merge.yml' -or -not (Test-DependabotAutoMergeWorkflow $Text))) { return $false }
         }
     }
     $pending = [Collections.Generic.Stack[object]]::new()
