@@ -109,8 +109,10 @@ public sealed class WorkflowContractTests
         { ReferenceReleasePath, "-CandidateKind Reference", "-CandidateKind Mod", "wrong reference candidate kind" },
         { PublishPath, "-CandidateKind Mod", "-CandidateKind Reference", "wrong mod candidate kind" },
         { ReferenceReleasePath, "scripts/Pack-GameApiRef.ps1", "dotnet pack", "noncanonical reference writer" },
+        { ReferenceReleasePath, "& dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore", "& dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", "release skipped long-running tests" },
         { CiPath, "dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", "dotnet restore 'FarmTogether2-ModKit.sln'", "unlocked restore" },
         { CiPath, "-warnaserror", "", "warnings not errors" },
+        { CiPath, "--filter 'Category!=LongRunning'", "--filter 'Category=LongRunning'", "long-running tests required on every change" },
         { CiPath, "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'", "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n          if ($LASTEXITCODE -ne 0) { throw 'Caller workflow validation failed.' }", "PowerShell caller validation checked an undefined native exit code" },
         { CiPath, "      - name: Validate generated caller workflows\n        shell: pwsh", "      - name: Validate generated caller workflows\n        shell: bash", "caller workflow validation shell" },
         { CiPath, "      - name: Check repository diff and leakage policy", "      - name: Duplicate caller workflow validation\n        shell: pwsh\n        run: |\n          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n      - name: Check repository diff and leakage policy", "duplicate caller workflow validation" },
@@ -490,7 +492,8 @@ public sealed class WorkflowContractTests
         RequirePermissions(root, new Dictionary<string, string> { ["contents"] = "read" }, CiPath);
         Require(text.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal), "CI restore must be locked.");
         Require(text.Contains("-warnaserror", StringComparison.Ordinal), "CI build must treat warnings as errors.");
-        Require(text.Contains("dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore", StringComparison.Ordinal), "CI must run all tests.");
+        Require(text.Contains("dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", StringComparison.Ordinal),
+            "CI must run the required test profile.");
         Require(text.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) && text.Contains("ref-package verify", StringComparison.Ordinal), "CI must write and inspect the reference package.");
         YamlMappingNode verify = Mapping(Mapping(root, "jobs", CiPath), "verify", CiPath);
         YamlMappingNode[] callerValidationSteps = Sequence(verify, "steps", CiPath).Children
@@ -592,7 +595,10 @@ public sealed class WorkflowContractTests
         string verifyScripts = JoinScripts(verify, "reference verify");
         AssertOrder(verifyScripts, "Receive-VerifiedArtifact.ps1", "Test-Candidate.ps1", "Pack-GameApiRef.ps1", "Test-PublishedAssets.ps1");
         Require(verifyScripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
-                verifyScripts.Contains("dotnet test 'FarmTogether2-ModKit.sln'", StringComparison.Ordinal), "Reference verify must independently rebuild and test the tag commit.");
+                Regex.IsMatch(verifyScripts,
+                    @"(?m)^\s*& dotnet test 'FarmTogether2-ModKit\.sln' -c Release --no-build --no-restore\s*$",
+                    RegexOptions.CultureInvariant),
+            "Reference verify must independently rebuild and fully test the tag commit.");
         string publishScripts = JoinScripts(publish, "reference publish");
         int receiver = publishScripts.IndexOf("Receive-VerifiedArtifact.ps1", StringComparison.Ordinal);
         int publisher = publishScripts.IndexOf("scripts/Publish-VerifiedRelease.ps1", StringComparison.Ordinal);

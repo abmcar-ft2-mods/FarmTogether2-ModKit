@@ -7,6 +7,7 @@ using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
 
+[Trait("Category", "LongRunning")]
 public sealed class ModKitResolverTests
 {
     private const string Commit = "0123456789abcdef0123456789abcdef01234567";

@@ -4,6 +4,7 @@ using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
 
+[Trait("Category", "LongRunning")]
 public sealed class ToolRunnerTests
 {
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
