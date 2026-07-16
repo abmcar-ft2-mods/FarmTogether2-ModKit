@@ -157,6 +157,7 @@ public sealed class WorkflowContractTests
     public void EveryPowerShellRunBlockParses()
     {
         IReadOnlyDictionary<string, string> files = LoadFiles();
+        List<object> scripts = [];
         foreach (string path in new[] { CiPath, ReferenceReleasePath, BuildPath, PublishPath })
         {
             YamlMappingNode jobs = Mapping(ParseYaml(files[path], path), "jobs", path);
@@ -171,43 +172,42 @@ public sealed class WorkflowContractTests
                     string? script = OptionalScalar(step, "run");
                     if (script is null)
                         continue;
-                    ProcessStartInfo startInfo = new("pwsh")
-                    {
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false
-                    };
-                    startInfo.ArgumentList.Add("-NoLogo");
-                    startInfo.ArgumentList.Add("-NoProfile");
-                    startInfo.ArgumentList.Add("-Command");
-                    startInfo.ArgumentList.Add("$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($env:WORKFLOW_SCRIPT, [ref]$tokens, [ref]$errors); if ($errors.Count -ne 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }");
-                    startInfo.Environment["WORKFLOW_SCRIPT"] = script;
-                    using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh parser.");
-                    string stdout = process.StandardOutput.ReadToEnd();
-                    string stderr = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
-                    Assert.True(process.ExitCode == 0, $"PowerShell parse failed for {path} job {jobName} step {index}.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+                    scripts.Add(new { Label = $"{path} job {jobName} step {index}", Script = script });
                 }
             }
         }
-        string publisher = Path.Combine(Root, ReleasePublisherPath.Replace('/', Path.DirectorySeparatorChar));
-        ProcessStartInfo publisherParser = new("pwsh")
+        scripts.Add(new
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        foreach (string argument in new[]
+            Label = ReleasePublisherPath,
+            Script = File.ReadAllText(Path.Combine(Root, ReleasePublisherPath.Replace('/', Path.DirectorySeparatorChar)))
+        });
+
+        string manifest = Path.Combine(Path.GetTempPath(), $"workflow-powershell-{Guid.NewGuid():N}.json");
+        try
         {
-            "-NoLogo", "-NoProfile", "-Command",
-            "$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:PUBLISHER_SCRIPT, [ref]$tokens, [ref]$errors); if ($errors.Count -ne 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }"
-        }) publisherParser.ArgumentList.Add(argument);
-        publisherParser.Environment["PUBLISHER_SCRIPT"] = publisher;
-        using Process publisherProcess = Process.Start(publisherParser) ?? throw new InvalidOperationException("Could not start publisher parser.");
-        string publisherOutput = publisherProcess.StandardOutput.ReadToEnd();
-        string publisherError = publisherProcess.StandardError.ReadToEnd();
-        publisherProcess.WaitForExit();
-        Assert.True(publisherProcess.ExitCode == 0, $"PowerShell parse failed for {ReleasePublisherPath}.\nstdout:\n{publisherOutput}\nstderr:\n{publisherError}");
+            File.WriteAllText(manifest, JsonSerializer.Serialize(scripts));
+            ProcessStartInfo startInfo = new("pwsh")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            foreach (string argument in new[]
+            {
+                "-NoLogo", "-NoProfile", "-Command",
+                "$failed = $false; foreach ($item in (Get-Content -LiteralPath $env:WORKFLOW_SCRIPTS -Raw | ConvertFrom-Json)) { $tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($item.Script, [ref]$tokens, [ref]$errors); if ($errors.Count -ne 0) { [Console]::Error.WriteLine($item.Label); $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; $failed = $true } }; if ($failed) { exit 1 }"
+            }) startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["WORKFLOW_SCRIPTS"] = manifest;
+            using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh parser.");
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            Assert.True(process.ExitCode == 0, $"PowerShell parse failed.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        }
+        finally
+        {
+            File.Delete(manifest);
+        }
     }
 
     [Fact]
