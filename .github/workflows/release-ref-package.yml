@@ -238,8 +238,10 @@ jobs:
             filter: ReleaseShard=2
           - shard: 3
             filter: ReleaseShard=3
+          - shard: 4
+            filter: ReleaseShard=4
           - shard: remainder
-            filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3
+            filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4
     steps:
       - name: Check out verified reference commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0

@@ -112,8 +112,8 @@ public sealed class WorkflowContractTests
         { PublishPath, "-CandidateKind Mod", "-CandidateKind Reference", "wrong mod candidate kind" },
         { ReferenceReleasePath, "scripts/Pack-GameApiRef.ps1", "dotnet pack", "noncanonical reference writer" },
         { ReferenceReleasePath, "    needs: [prepare, verify, full-tests]", "    needs: [prepare, verify]", "release publication ignores full tests" },
-        { ReferenceReleasePath, "          - shard: 3\n            filter: ReleaseShard=3", "          - shard: missing\n            filter: ReleaseShard=missing", "release test shard missing" },
-        { ReferenceReleasePath, "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3", "filter: ReleaseShard!=1&ReleaseShard!=2", "release remainder overlaps a shard" },
+        { ReferenceReleasePath, "          - shard: 4\n            filter: ReleaseShard=4", "          - shard: missing\n            filter: ReleaseShard=missing", "release test shard missing" },
+        { ReferenceReleasePath, "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4", "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3", "release remainder overlaps a shard" },
         { ReferenceReleasePath, "--filter $env:TEST_FILTER", "--filter 'Category!=LongRunning'", "release skipped long-running tests" },
         { ReferenceReleasePath, "    timeout-minutes: 30", "    timeout-minutes: 31", "release job timeout weakened" },
         { ReferenceReleasePath, "          dotnet-version: 8.0.x\n          global-json-file: global.json", "          global-json-file: global.json", "release job lacks .NET 8 runtime" },
@@ -752,7 +752,7 @@ public sealed class WorkflowContractTests
         YamlMappingNode strategy = Mapping(fullTests, "strategy", label);
         Require(Scalar(strategy, "fail-fast", label) == "false", "Reference full-test shards must all finish.");
         YamlSequenceNode include = Sequence(Mapping(strategy, "matrix", label), "include", label);
-        Require(include.Children.Count == 4, "Reference full-test matrix must have four shards.");
+        Require(include.Children.Count == 5, "Reference full-test matrix must have five shards.");
         Dictionary<string, string> shards = include.Children
             .Select((entry, index) => AsMapping(entry, $"{label} shard {index}"))
             .ToDictionary(
@@ -764,7 +764,8 @@ public sealed class WorkflowContractTests
             ["1"] = "ReleaseShard=1",
             ["2"] = "ReleaseShard=2",
             ["3"] = "ReleaseShard=3",
-            ["remainder"] = "ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3"
+            ["4"] = "ReleaseShard=4",
+            ["remainder"] = "ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4"
         };
         Require(shards.Count == expected.Count && expected.All(pair =>
                 shards.TryGetValue(pair.Key, out string? filter) && filter == pair.Value),
@@ -817,7 +818,12 @@ public sealed class WorkflowContractTests
             [(typeof(GameSwitchTests), nameof(GameSwitchTests.RestoreResumesEveryPhysicalAndJournalCrash))] = "3",
             [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.ExactTagOnSecondPageIsFoundWithoutCreatingAnotherRelease))] = "3",
             [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.PublishedAssetByteMutationAfterPublicationIsRejected))] = "3",
-            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.PublishedRerunSkipsMutationsAndReverifiesAttestations))] = "3"
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.PublishedRerunSkipsMutationsAndReverifiesAttestations))] = "3",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.RestoreRejectsEveryOtherAppManifestIdentityOrByteChange))] = "4",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.LegacyActiveStateMigrationIsPersistedEvenWhenTheActionHasNoPhaseTransition))] = "4",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.ClosedJournalRejectsDuplicateJsonPropertiesAtEveryRelevantDepth))] = "4",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.ClosedJournalRejectsJsonValuesWithWrongTypesBeforeMutation))] = "4",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.CompletedSnapshotRejectsDuplicateOrWrongJsonTypes))] = "4"
         };
         HashSet<(Type Type, string Method)> seen = [];
         foreach (Type type in typeof(WorkflowContractTests).Assembly.GetTypes())
@@ -830,7 +836,7 @@ public sealed class WorkflowContractTests
                 Require(assignments.Length <= 1, $"Test method has multiple release shards: {type.FullName}.{method.Name}.");
                 if (assignments.Length == 0)
                     continue;
-                Require(assignments[0] is "1" or "2" or "3", $"Test method has an unknown release shard: {type.FullName}.{method.Name}.");
+                Require(assignments[0] is "1" or "2" or "3" or "4", $"Test method has an unknown release shard: {type.FullName}.{method.Name}.");
                 (Type Type, string Method) key = (type, method.Name);
                 if (expected.TryGetValue(key, out string? shard))
                 {
