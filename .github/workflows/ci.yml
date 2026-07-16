@@ -50,10 +50,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Build failed with exit code $LASTEXITCODE."
           }
-      - name: Run all tests
+      - name: Run required tests
         shell: pwsh
         run: |
-          & dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore
+          & dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'
           if ($LASTEXITCODE -ne 0) {
             throw "Tests failed with exit code $LASTEXITCODE."
           }

@@ -7,6 +7,7 @@ using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
 
+[Trait("Category", "LongRunning")]
 public sealed class RefPackageTests
 {
     private const string PackageId = "FarmTogether2.GameApi.Ref";

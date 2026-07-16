@@ -7,6 +7,7 @@ using Xunit;
 
 namespace FarmTogether2.ModKit.Tests;
 
+[Trait("Category", "LongRunning")]
 public sealed class VerifiedReleasePublisherTests
 {
     private const string TagObject = "1111111111111111111111111111111111111111";

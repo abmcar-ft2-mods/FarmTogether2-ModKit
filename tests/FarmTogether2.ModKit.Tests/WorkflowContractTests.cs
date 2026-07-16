@@ -109,8 +109,10 @@ public sealed class WorkflowContractTests
         { ReferenceReleasePath, "-CandidateKind Reference", "-CandidateKind Mod", "wrong reference candidate kind" },
         { PublishPath, "-CandidateKind Mod", "-CandidateKind Reference", "wrong mod candidate kind" },
         { ReferenceReleasePath, "scripts/Pack-GameApiRef.ps1", "dotnet pack", "noncanonical reference writer" },
+        { ReferenceReleasePath, "& dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore", "& dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", "release skipped long-running tests" },
         { CiPath, "dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", "dotnet restore 'FarmTogether2-ModKit.sln'", "unlocked restore" },
         { CiPath, "-warnaserror", "", "warnings not errors" },
+        { CiPath, "--filter 'Category!=LongRunning'", "--filter 'Category=LongRunning'", "long-running tests required on every change" },
         { CiPath, "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'", "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n          if ($LASTEXITCODE -ne 0) { throw 'Caller workflow validation failed.' }", "PowerShell caller validation checked an undefined native exit code" },
         { CiPath, "      - name: Validate generated caller workflows\n        shell: pwsh", "      - name: Validate generated caller workflows\n        shell: bash", "caller workflow validation shell" },
         { CiPath, "      - name: Check repository diff and leakage policy", "      - name: Duplicate caller workflow validation\n        shell: pwsh\n        run: |\n          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n      - name: Check repository diff and leakage policy", "duplicate caller workflow validation" },
@@ -155,6 +157,7 @@ public sealed class WorkflowContractTests
     public void EveryPowerShellRunBlockParses()
     {
         IReadOnlyDictionary<string, string> files = LoadFiles();
+        List<object> scripts = [];
         foreach (string path in new[] { CiPath, ReferenceReleasePath, BuildPath, PublishPath })
         {
             YamlMappingNode jobs = Mapping(ParseYaml(files[path], path), "jobs", path);
@@ -169,43 +172,42 @@ public sealed class WorkflowContractTests
                     string? script = OptionalScalar(step, "run");
                     if (script is null)
                         continue;
-                    ProcessStartInfo startInfo = new("pwsh")
-                    {
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false
-                    };
-                    startInfo.ArgumentList.Add("-NoLogo");
-                    startInfo.ArgumentList.Add("-NoProfile");
-                    startInfo.ArgumentList.Add("-Command");
-                    startInfo.ArgumentList.Add("$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($env:WORKFLOW_SCRIPT, [ref]$tokens, [ref]$errors); if ($errors.Count -ne 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }");
-                    startInfo.Environment["WORKFLOW_SCRIPT"] = script;
-                    using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh parser.");
-                    string stdout = process.StandardOutput.ReadToEnd();
-                    string stderr = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
-                    Assert.True(process.ExitCode == 0, $"PowerShell parse failed for {path} job {jobName} step {index}.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+                    scripts.Add(new { Label = $"{path} job {jobName} step {index}", Script = script });
                 }
             }
         }
-        string publisher = Path.Combine(Root, ReleasePublisherPath.Replace('/', Path.DirectorySeparatorChar));
-        ProcessStartInfo publisherParser = new("pwsh")
+        scripts.Add(new
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        foreach (string argument in new[]
+            Label = ReleasePublisherPath,
+            Script = File.ReadAllText(Path.Combine(Root, ReleasePublisherPath.Replace('/', Path.DirectorySeparatorChar)))
+        });
+
+        string manifest = Path.Combine(Path.GetTempPath(), $"workflow-powershell-{Guid.NewGuid():N}.json");
+        try
         {
-            "-NoLogo", "-NoProfile", "-Command",
-            "$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:PUBLISHER_SCRIPT, [ref]$tokens, [ref]$errors); if ($errors.Count -ne 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }"
-        }) publisherParser.ArgumentList.Add(argument);
-        publisherParser.Environment["PUBLISHER_SCRIPT"] = publisher;
-        using Process publisherProcess = Process.Start(publisherParser) ?? throw new InvalidOperationException("Could not start publisher parser.");
-        string publisherOutput = publisherProcess.StandardOutput.ReadToEnd();
-        string publisherError = publisherProcess.StandardError.ReadToEnd();
-        publisherProcess.WaitForExit();
-        Assert.True(publisherProcess.ExitCode == 0, $"PowerShell parse failed for {ReleasePublisherPath}.\nstdout:\n{publisherOutput}\nstderr:\n{publisherError}");
+            File.WriteAllText(manifest, JsonSerializer.Serialize(scripts));
+            ProcessStartInfo startInfo = new("pwsh")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            foreach (string argument in new[]
+            {
+                "-NoLogo", "-NoProfile", "-Command",
+                "$failed = $false; foreach ($item in (Get-Content -LiteralPath $env:WORKFLOW_SCRIPTS -Raw | ConvertFrom-Json)) { $tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($item.Script, [ref]$tokens, [ref]$errors); if ($errors.Count -ne 0) { [Console]::Error.WriteLine($item.Label); $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; $failed = $true } }; if ($failed) { exit 1 }"
+            }) startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["WORKFLOW_SCRIPTS"] = manifest;
+            using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pwsh parser.");
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            Assert.True(process.ExitCode == 0, $"PowerShell parse failed.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        }
+        finally
+        {
+            File.Delete(manifest);
+        }
     }
 
     [Fact]
@@ -490,7 +492,8 @@ public sealed class WorkflowContractTests
         RequirePermissions(root, new Dictionary<string, string> { ["contents"] = "read" }, CiPath);
         Require(text.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal), "CI restore must be locked.");
         Require(text.Contains("-warnaserror", StringComparison.Ordinal), "CI build must treat warnings as errors.");
-        Require(text.Contains("dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore", StringComparison.Ordinal), "CI must run all tests.");
+        Require(text.Contains("dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", StringComparison.Ordinal),
+            "CI must run the required test profile.");
         Require(text.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) && text.Contains("ref-package verify", StringComparison.Ordinal), "CI must write and inspect the reference package.");
         YamlMappingNode verify = Mapping(Mapping(root, "jobs", CiPath), "verify", CiPath);
         YamlMappingNode[] callerValidationSteps = Sequence(verify, "steps", CiPath).Children
@@ -592,7 +595,10 @@ public sealed class WorkflowContractTests
         string verifyScripts = JoinScripts(verify, "reference verify");
         AssertOrder(verifyScripts, "Receive-VerifiedArtifact.ps1", "Test-Candidate.ps1", "Pack-GameApiRef.ps1", "Test-PublishedAssets.ps1");
         Require(verifyScripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
-                verifyScripts.Contains("dotnet test 'FarmTogether2-ModKit.sln'", StringComparison.Ordinal), "Reference verify must independently rebuild and test the tag commit.");
+                Regex.IsMatch(verifyScripts,
+                    @"(?m)^\s*& dotnet test 'FarmTogether2-ModKit\.sln' -c Release --no-build --no-restore\s*$",
+                    RegexOptions.CultureInvariant),
+            "Reference verify must independently rebuild and fully test the tag commit.");
         string publishScripts = JoinScripts(publish, "reference publish");
         int receiver = publishScripts.IndexOf("Receive-VerifiedArtifact.ps1", StringComparison.Ordinal);
         int publisher = publishScripts.IndexOf("scripts/Publish-VerifiedRelease.ps1", StringComparison.Ordinal);
