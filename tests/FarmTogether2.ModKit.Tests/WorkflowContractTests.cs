@@ -28,8 +28,7 @@ public sealed class WorkflowContractTests
     {
         { CiPath, Checkout, "actions/checkout@main", "movable official action" },
         { CiPath, "runs-on: windows-2025", "runs-on: windows-latest", "mutable runner" },
-        { CiPath, "          dotnet-version: 8.0.x\n", "", "missing auxiliary target-pack SDK" },
-        { CiPath, "dotnet-version: 8.0.x", "dotnet-version: 9.0.x", "different auxiliary target-pack SDK" },
+        { CiPath, "          global-json-file: global.json", "          dotnet-version: 8.0.x\n          global-json-file: global.json", "redundant auxiliary SDK download" },
         { CiPath, "global-json-file: global.json", "global-json-file: missing.json", "different global.json" },
         { CiPath, "Get-Content -LiteralPath 'global.json'", "Get-Content -LiteralPath 'missing.json'", "different SDK assertion source" },
         { CiPath, "cancel-in-progress: false", "cancel-in-progress: true", "cancelling concurrency" },
@@ -325,7 +324,7 @@ public sealed class WorkflowContractTests
                 string jobName = ((YamlScalarNode)jobKey).Value ?? string.Empty;
                 YamlMappingNode job = AsMapping(jobValue, $"{path} job {jobName}");
                 Require(Scalar(job, "runs-on", path) == "windows-2025", $"{path} job {jobName} must use windows-2025.");
-                ValidateSdkAndGhSteps(job, $"{path} job {jobName}");
+                ValidateSdkAndGhSteps(job, $"{path} job {jobName}", installAuxiliarySdk: path != CiPath);
                 ValidateCheckoutTokens(job, $"{path} job {jobName}");
             }
         }
@@ -347,7 +346,7 @@ public sealed class WorkflowContractTests
         }
     }
 
-    private static void ValidateSdkAndGhSteps(YamlMappingNode job, string label)
+    private static void ValidateSdkAndGhSteps(YamlMappingNode job, string label, bool installAuxiliarySdk)
     {
         YamlSequenceNode steps = Sequence(job, "steps", label);
         int setupIndex = -1;
@@ -361,10 +360,18 @@ public sealed class WorkflowContractTests
                 Require(setupIndex < 0, $"{label} has duplicate setup-dotnet steps.");
                 setupIndex = index;
                 YamlMappingNode with = Mapping(step, "with", label);
-                Require(with.Children.Count == 2 &&
-                        Scalar(with, "dotnet-version", label) == "8.0.x" &&
-                        Scalar(with, "global-json-file", label) == "global.json",
-                    $"{label} setup-dotnet must install .NET 8 target packs and use global.json.");
+                Require(Scalar(with, "global-json-file", label) == "global.json",
+                    $"{label} setup-dotnet must use global.json.");
+                if (installAuxiliarySdk)
+                {
+                    Require(with.Children.Count == 2 && Scalar(with, "dotnet-version", label) == "8.0.x",
+                        $"{label} setup-dotnet must install .NET 8 target packs.");
+                }
+                else
+                {
+                    Require(with.Children.Count == 1,
+                        $"{label} setup-dotnet must not download a redundant auxiliary SDK.");
+                }
             }
             if (run is not null &&
                 (Regex.IsMatch(run, @"(?i)\bgh\s") || run.Contains("Resolve-ModKit.ps1", StringComparison.Ordinal) ||
