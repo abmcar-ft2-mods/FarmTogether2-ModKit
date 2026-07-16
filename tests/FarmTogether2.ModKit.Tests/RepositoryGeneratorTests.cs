@@ -43,6 +43,9 @@ public sealed class RepositoryGeneratorTests
         Assert.Contains("FarmTogether2.GameApi.Ref", nuget, StringComparison.Ordinal);
         Assert.Contains("FarmTogether2-ModKit", nuget, StringComparison.Ordinal);
         Assert.DoesNotContain("pattern=\"*\"", nuget, StringComparison.Ordinal);
+        Assert.Equal(
+            File.ReadAllBytes(Path.Combine(Root, "global.json")),
+            File.ReadAllBytes(Path.Combine(fixture.Repository, "global.json")));
     }
 
     [Fact]
@@ -69,6 +72,8 @@ public sealed class RepositoryGeneratorTests
 
         string dependabot = File.ReadAllText(Path.Combine(fixture.Repository, ".github", "dependabot.yml"));
         Assert.Contains("package-ecosystem: github-actions", dependabot, StringComparison.Ordinal);
+        Assert.Contains("package-ecosystem: dotnet-sdk", dependabot, StringComparison.Ordinal);
+        Assert.Contains("interval: daily", dependabot, StringComparison.Ordinal);
         Assert.DoesNotContain("package-ecosystem: nuget", dependabot, StringComparison.Ordinal);
     }
 

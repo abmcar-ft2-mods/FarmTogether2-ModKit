@@ -152,6 +152,8 @@ Assert-NoReparseAncestor $root 'Repository root'
 if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "Repository root does not exist: $root" }
 $lock = Read-GeneratorInput $root
 $commit = [string]$lock.workflowCommit
+$globalJsonSource = Join-Path (Split-Path -Parent $PSScriptRoot) 'global.json'
+Assert-RegularFile $globalJsonSource 'ModKit global.json'
 
 $files = [ordered]@{}
 $files['.gitattributes'] = ConvertTo-Utf8 @'
@@ -185,15 +187,7 @@ TestResults/
 *.user
 *.suo
 '@
-$files['global.json'] = ConvertTo-Utf8 @'
-{
-  "sdk": {
-    "version": "8.0.421",
-    "rollForward": "disable",
-    "allowPrerelease": false
-  }
-}
-'@
+$files['global.json'] = ConvertTo-Utf8 ([IO.File]::ReadAllText($globalJsonSource))
 $files['NuGet.config'] = ConvertTo-Utf8 @'
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
@@ -405,7 +399,11 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
+  - package-ecosystem: dotnet-sdk
+    directory: /
+    schedule:
+      interval: daily
 '@
 }
 

@@ -3,8 +3,26 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
+    groups:
+      github-actions:
+        patterns:
+          - "*"
   - package-ecosystem: nuget
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
+    groups:
+      test-tooling:
+        patterns:
+          - Microsoft.NET.Test.Sdk
+          - xunit*
+          - YamlDotNet
+    # These compile-time references must match the BepInEx runtime shipped with the game.
+    ignore:
+      - dependency-name: Il2CppInterop.Common
+      - dependency-name: Il2CppInterop.Runtime
+  - package-ecosystem: dotnet-sdk
+    directory: /
+    schedule:
+      interval: daily
