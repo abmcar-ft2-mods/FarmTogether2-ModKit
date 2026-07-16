@@ -255,6 +255,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(ActivateOldCrashPoints))]
+    [Trait("ReleaseShard", "2")]
     public void ActivateOldResumesEveryPhysicalAndJournalCrash(string crashPoint)
     {
         using Fixture fixture = new();
@@ -267,6 +268,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(ActivateCurrentCrashPoints))]
+    [Trait("ReleaseShard", "3")]
     public void ActivateCurrentResumesEveryPhysicalAndJournalCrash(string crashPoint)
     {
         using Fixture fixture = new();
@@ -283,6 +285,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(RestoreCrashPoints))]
+    [Trait("ReleaseShard", "3")]
     public void RestoreResumesEveryPhysicalAndJournalCrash(string crashPoint)
     {
         using Fixture fixture = new();
@@ -297,6 +300,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(RestorePhaseEntryPoints))]
+    [Trait("ReleaseShard", "2")]
     public void EveryPersistedPhaseCanReenterRestoreAndConverge(string phase, string route)
     {
         using Fixture fixture = new();
@@ -698,6 +702,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(CaptureCrashPoints))]
+    [Trait("ReleaseShard", "1")]
     public void CaptureRestoresAfterEveryOperationFailureThenRerunsToSuccess(string crashPoint, string priorState)
     {
         using Fixture fixture = new();

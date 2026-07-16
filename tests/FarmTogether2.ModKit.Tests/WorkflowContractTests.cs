@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using YamlDotNet.RepresentationModel;
@@ -29,6 +30,7 @@ public sealed class WorkflowContractTests
         { CiPath, Checkout, "actions/checkout@main", "movable official action" },
         { CiPath, "runs-on: windows-2025", "runs-on: windows-latest", "mutable runner" },
         { CiPath, "          global-json-file: global.json", "          dotnet-version: 8.0.x\n          global-json-file: global.json", "redundant auxiliary SDK download" },
+        { ReferenceReleasePath, "          global-json-file: global.json", "          dotnet-version: 8.0.x\n          global-json-file: global.json", "redundant release SDK download" },
         { CiPath, "global-json-file: global.json", "global-json-file: missing.json", "different global.json" },
         { CiPath, "Get-Content -LiteralPath 'global.json'", "Get-Content -LiteralPath 'missing.json'", "different SDK assertion source" },
         { CiPath, "cancel-in-progress: false", "cancel-in-progress: true", "cancelling concurrency" },
@@ -69,7 +71,8 @@ public sealed class WorkflowContractTests
         { BuildPath, "-Destination '.modkit/packages'", "-Destination '.modkit/bootstrap'", "resolver overwrites bootstrap" },
         { PublishPath, "      - name: Check out caller at requested tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out caller at requested tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "mod verify shallow tag checkout" },
         { PublishPath, "      - name: Check out caller at verified tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out caller at verified tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "mod publish shallow tag checkout" },
-        { ReferenceReleasePath, "      - name: Check out exact reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out exact reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "reference verify shallow tag checkout" },
+        { ReferenceReleasePath, "      - name: Check out exact reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out exact reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "reference prepare shallow tag checkout" },
+        { ReferenceReleasePath, "      - name: Check out verified reference commit\n        uses: " + Checkout + "\n        with:\n          ref: ${{ needs.prepare.outputs.commit }}\n          fetch-depth: 0", "      - name: Check out verified reference commit\n        uses: " + Checkout + "\n        with:\n          ref: ${{ needs.prepare.outputs.tag }}\n          fetch-depth: 0", "reference verification uses mutable tag" },
         { ReferenceReleasePath, "      - name: Check out exact verified reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 0", "      - name: Check out exact verified reference tag\n        uses: " + Checkout + "\n        with:\n          ref: ${{ steps.request.outputs.tag }}\n          fetch-depth: 1", "reference publish shallow tag checkout" },
         { BuildPath, "(Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256)", "('unchecked')", "missing package hash verification" },
         { BuildPath, "rev-parse --abbrev-ref HEAD", "rev-parse HEAD", "missing detached HEAD verification" },
@@ -108,10 +111,17 @@ public sealed class WorkflowContractTests
         { ReferenceReleasePath, "-CandidateKind Reference", "-CandidateKind Mod", "wrong reference candidate kind" },
         { PublishPath, "-CandidateKind Mod", "-CandidateKind Reference", "wrong mod candidate kind" },
         { ReferenceReleasePath, "scripts/Pack-GameApiRef.ps1", "dotnet pack", "noncanonical reference writer" },
-        { ReferenceReleasePath, "& dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore", "& dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", "release skipped long-running tests" },
+        { ReferenceReleasePath, "    needs: [prepare, verify, full-tests]", "    needs: [prepare, verify]", "release publication ignores full tests" },
+        { ReferenceReleasePath, "          - shard: 3\n            filter: ReleaseShard=3", "          - shard: missing\n            filter: ReleaseShard=missing", "release test shard missing" },
+        { ReferenceReleasePath, "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3", "filter: ReleaseShard!=1&ReleaseShard!=2", "release remainder overlaps a shard" },
+        { ReferenceReleasePath, "--filter $env:TEST_FILTER", "--filter 'Category!=LongRunning'", "release skipped long-running tests" },
+        { ReferenceReleasePath, "    timeout-minutes: 30", "    timeout-minutes: 31", "release job timeout weakened" },
+        { ReferenceReleasePath, "          dotnet-version: 8.0.x\n          global-json-file: global.json", "          global-json-file: global.json", "release job lacks .NET 8 runtime" },
+        { ReferenceReleasePath, "      - name: Receive and validate frozen reference candidate again\n        shell: pwsh\n        env:\n          GH_TOKEN: ${{ github.token }}\n          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}", "      - name: Receive and validate frozen reference candidate again\n        shell: pwsh\n        env:\n          GH_TOKEN: ${{ github.token }}\n          EXPECTED_COMMIT: 2222222222222222222222222222222222222222", "reference publish receiver uses hardcoded commit" },
         { CiPath, "dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", "dotnet restore 'FarmTogether2-ModKit.sln'", "unlocked restore" },
         { CiPath, "-warnaserror", "", "warnings not errors" },
         { CiPath, "--filter 'Category!=LongRunning'", "--filter 'Category=LongRunning'", "long-running tests required on every change" },
+        { CiPath, "dotnet 'tools/FarmTogether2.ModKit.Tool/bin/Release/net8.0/FarmTogether2.ModKit.Tool.dll'", "dotnet run --project 'tools/FarmTogether2.ModKit.Tool/FarmTogether2.ModKit.Tool.csproj'", "CI restarts MSBuild to inspect the package" },
         { CiPath, "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'", "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n          if ($LASTEXITCODE -ne 0) { throw 'Caller workflow validation failed.' }", "PowerShell caller validation checked an undefined native exit code" },
         { CiPath, "      - name: Validate generated caller workflows\n        shell: pwsh", "      - name: Validate generated caller workflows\n        shell: bash", "caller workflow validation shell" },
         { CiPath, "      - name: Check repository diff and leakage policy", "      - name: Duplicate caller workflow validation\n        shell: pwsh\n        run: |\n          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n      - name: Check repository diff and leakage policy", "duplicate caller workflow validation" },
@@ -324,7 +334,13 @@ public sealed class WorkflowContractTests
                 string jobName = ((YamlScalarNode)jobKey).Value ?? string.Empty;
                 YamlMappingNode job = AsMapping(jobValue, $"{path} job {jobName}");
                 Require(Scalar(job, "runs-on", path) == "windows-2025", $"{path} job {jobName} must use windows-2025.");
-                ValidateSdkAndGhSteps(job, $"{path} job {jobName}", installAuxiliarySdk: path != CiPath);
+                bool requiresSdk = path != ReferenceReleasePath || jobName != "prepare";
+                bool installAuxiliarySdk =
+                    path == BuildPath ||
+                    path == PublishPath ||
+                    (path == CiPath && jobName == "release-benchmark") ||
+                    (path == ReferenceReleasePath && jobName != "prepare");
+                ValidateSdkAndGhSteps(job, $"{path} job {jobName}", requiresSdk, installAuxiliarySdk);
                 ValidateCheckoutTokens(job, $"{path} job {jobName}");
             }
         }
@@ -346,7 +362,11 @@ public sealed class WorkflowContractTests
         }
     }
 
-    private static void ValidateSdkAndGhSteps(YamlMappingNode job, string label, bool installAuxiliarySdk)
+    private static void ValidateSdkAndGhSteps(
+        YamlMappingNode job,
+        string label,
+        bool requiresSdk,
+        bool installAuxiliarySdk)
     {
         YamlSequenceNode steps = Sequence(job, "steps", label);
         int setupIndex = -1;
@@ -394,6 +414,12 @@ public sealed class WorkflowContractTests
                 }
             }
         }
+        if (!requiresSdk)
+        {
+            Require(setupIndex < 0, $"{label} must not install an unused .NET SDK.");
+            return;
+        }
+
         Require(setupIndex >= 0 && setupIndex + 1 < steps.Children.Count, $"{label} lacks setup-dotnet and an immediate assertion.");
         YamlMappingNode assertion = AsMapping(steps.Children[setupIndex + 1], $"{label} SDK assertion");
         string assertionScript = Scalar(assertion, "run", label);
@@ -497,12 +523,18 @@ public sealed class WorkflowContractTests
     private static void ValidateCi(string text, YamlMappingNode root)
     {
         RequirePermissions(root, new Dictionary<string, string> { ["contents"] = "read" }, CiPath);
-        Require(text.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal), "CI restore must be locked.");
-        Require(text.Contains("-warnaserror", StringComparison.Ordinal), "CI build must treat warnings as errors.");
-        Require(text.Contains("dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", StringComparison.Ordinal),
-            "CI must run the required test profile.");
-        Require(text.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) && text.Contains("ref-package verify", StringComparison.Ordinal), "CI must write and inspect the reference package.");
         YamlMappingNode verify = Mapping(Mapping(root, "jobs", CiPath), "verify", CiPath);
+        string verifyScripts = JoinScripts(verify, "CI verify");
+        Require(verifyScripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal), "CI restore must be locked.");
+        Require(verifyScripts.Contains("-warnaserror", StringComparison.Ordinal), "CI build must treat warnings as errors.");
+        Require(verifyScripts.Contains("dotnet test 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", StringComparison.Ordinal),
+            "CI must run the required test profile.");
+        Require(verifyScripts.Contains("dotnet 'tools/FarmTogether2.ModKit.Tool/bin/Release/net8.0/FarmTogether2.ModKit.Tool.dll'", StringComparison.Ordinal) &&
+                !Regex.IsMatch(verifyScripts, @"(?i)\bdotnet\s+run\b", RegexOptions.CultureInvariant),
+            "CI must inspect the reference package with the already-built tool.");
+        Require(verifyScripts.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) &&
+                verifyScripts.Contains("ref-package verify", StringComparison.Ordinal),
+            "CI must write and inspect the reference package.");
         YamlMappingNode[] callerValidationSteps = Sequence(verify, "steps", CiPath).Children
             .Select((step, index) => AsMapping(step, $"{CiPath} verify step {index}"))
             .Where(step => OptionalScalar(step, "run")?.Contains(
@@ -514,7 +546,9 @@ public sealed class WorkflowContractTests
         Require(OptionalScalar(callerValidationSteps[0], "shell") == "pwsh", "CI caller workflow validation must use pwsh.");
         string callerValidation = Scalar(callerValidationSteps[0], "run", CiPath);
         Require(!callerValidation.Contains("$LASTEXITCODE", StringComparison.Ordinal), "CI must not inspect native exit state after a PowerShell script.");
-        Require(text.Contains("git diff --check", StringComparison.Ordinal) && text.Contains("scripts/Test-Repository.ps1", StringComparison.Ordinal), "CI must run diff and leakage checks.");
+        Require(verifyScripts.Contains("git diff --check", StringComparison.Ordinal) &&
+                verifyScripts.Contains("scripts/Test-Repository.ps1", StringComparison.Ordinal),
+            "CI must run diff and leakage checks.");
         Require(text.Contains("id: candidate", StringComparison.Ordinal) && text.Contains("FarmTogether2.GameApi.Ref-candidate-${{ github.sha }}", StringComparison.Ordinal), "CI main artifact identity is missing.");
         Require(text.Contains("retention-days: 7", StringComparison.Ordinal), "CI candidate retention must be seven days.");
         Require(text.Contains("steps.candidate.outputs.artifact-id", StringComparison.Ordinal) && text.Contains("steps.candidate.outputs.artifact-digest", StringComparison.Ordinal), "CI must summarize immutable artifact evidence.");
@@ -574,7 +608,7 @@ public sealed class WorkflowContractTests
         RequirePermissions(verify, new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "read" }, "mod verify");
         RequirePermissions(publish, new Dictionary<string, string> { ["actions"] = "read", ["attestations"] = "read", ["contents"] = "write" }, "mod publish");
         Require(Scalar(publish, "needs", PublishPath) == "verify", "Mod publish must depend on verify.");
-        ValidateAnnotatedEvidence(text, "Mod");
+        ValidateAnnotatedEvidence(text, "Mod", "verify");
         ValidatePublishJob(verify, "verify", isReference: false);
         ValidatePublishJob(publish, "publish", isReference: false);
         string verifyScripts = JoinScripts(verify, "mod verify");
@@ -591,21 +625,36 @@ public sealed class WorkflowContractTests
         YamlMappingNode root = ParseYaml(text, ReferenceReleasePath);
         RequirePermissions(root, new Dictionary<string, string>(), ReferenceReleasePath);
         YamlMappingNode jobs = Mapping(root, "jobs", ReferenceReleasePath);
+        YamlMappingNode prepare = Mapping(jobs, "prepare", ReferenceReleasePath);
         YamlMappingNode verify = Mapping(jobs, "verify", ReferenceReleasePath);
+        YamlMappingNode fullTests = Mapping(jobs, "full-tests", ReferenceReleasePath);
         YamlMappingNode publish = Mapping(jobs, "publish", ReferenceReleasePath);
+        RequirePermissions(prepare, new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "read" }, "reference prepare");
         RequirePermissions(verify, new Dictionary<string, string> { ["actions"] = "read", ["contents"] = "read" }, "reference verify");
+        RequirePermissions(fullTests, new Dictionary<string, string> { ["contents"] = "read" }, "reference full tests");
         RequirePermissions(publish, new Dictionary<string, string> { ["actions"] = "read", ["attestations"] = "read", ["contents"] = "write" }, "reference publish");
-        Require(Scalar(publish, "needs", ReferenceReleasePath) == "verify", "Reference publish must depend on verify.");
-        ValidateAnnotatedEvidence(text, "Reference");
-        ValidatePublishJob(verify, "verify", isReference: true);
+        Require(Scalar(verify, "timeout-minutes", ReferenceReleasePath) == "30" &&
+                Scalar(fullTests, "timeout-minutes", ReferenceReleasePath) == "30" &&
+                Scalar(publish, "timeout-minutes", ReferenceReleasePath) == "30",
+            "Reference rebuild, full-test shards, and publication must fail closed after 30 minutes.");
+        Require(Scalar(verify, "needs", ReferenceReleasePath) == "prepare", "Reference verify must depend on prepare.");
+        Require(Scalar(fullTests, "needs", ReferenceReleasePath) == "prepare", "Reference full tests must depend on prepare.");
+        HashSet<string> publishNeeds = Sequence(publish, "needs", ReferenceReleasePath).Children
+            .Select(node => ((YamlScalarNode)node).Value ?? string.Empty)
+            .ToHashSet(StringComparer.Ordinal);
+        Require(publishNeeds.SetEquals(["prepare", "verify", "full-tests"]), "Reference publish must depend on prepare, verify, and every full-test shard.");
+        ValidateAnnotatedEvidence(text, "Reference", "prepare");
+        ValidateReferencePrepare(prepare);
+        ValidateReferenceVerification(verify);
+        ValidateReferenceFullTests(fullTests);
+        ValidateReleaseShardAssignments();
         ValidatePublishJob(publish, "publish", isReference: true);
         string verifyScripts = JoinScripts(verify, "reference verify");
         AssertOrder(verifyScripts, "Receive-VerifiedArtifact.ps1", "Test-Candidate.ps1", "Pack-GameApiRef.ps1", "Test-PublishedAssets.ps1");
         Require(verifyScripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
-                Regex.IsMatch(verifyScripts,
-                    @"(?m)^\s*& dotnet test 'FarmTogether2-ModKit\.sln' -c Release --no-build --no-restore\s*$",
-                    RegexOptions.CultureInvariant),
-            "Reference verify must independently rebuild and fully test the tag commit.");
+                verifyScripts.Contains("dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror", StringComparison.Ordinal) &&
+                !Regex.IsMatch(verifyScripts, @"(?i)\bdotnet\s+test\b", RegexOptions.CultureInvariant),
+            "Reference verify must independently rebuild the tag commit without serializing the full tests behind it.");
         string publishScripts = JoinScripts(publish, "reference publish");
         int receiver = publishScripts.IndexOf("Receive-VerifiedArtifact.ps1", StringComparison.Ordinal);
         int publisher = publishScripts.IndexOf("scripts/Publish-VerifiedRelease.ps1", StringComparison.Ordinal);
@@ -613,16 +662,207 @@ public sealed class WorkflowContractTests
         ValidateDraftRelease(publishScripts, "scripts/Publish-VerifiedRelease.ps1", "Reference");
     }
 
-    private static void ValidateAnnotatedEvidence(string text, string kind)
+    private static void ValidateReferencePrepare(YamlMappingNode prepare)
     {
+        const string label = "reference prepare";
+        YamlMappingNode outputs = Mapping(prepare, "outputs", label);
+        Dictionary<string, string> expectedOutputs = new(StringComparer.Ordinal)
+        {
+            ["tag"] = "${{ steps.evidence.outputs.tag }}",
+            ["tag-object"] = "${{ steps.evidence.outputs.tag-object }}",
+            ["commit"] = "${{ steps.evidence.outputs.commit }}",
+            ["workflow-id"] = "${{ steps.evidence.outputs.workflow-id }}",
+            ["run-id"] = "${{ steps.evidence.outputs.run-id }}",
+            ["artifact-id"] = "${{ steps.evidence.outputs.artifact-id }}",
+            ["artifact-name"] = "${{ steps.evidence.outputs.artifact-name }}",
+            ["artifact-digest"] = "${{ steps.evidence.outputs.artifact-digest }}"
+        };
+        Require(outputs.Children.Count == expectedOutputs.Count, "Reference prepare outputs differ.");
+        foreach ((string name, string value) in expectedOutputs)
+            Require(Scalar(outputs, name, label) == value, $"Reference prepare output differs: {name}.");
+
+        YamlMappingNode[] steps = Sequence(prepare, "steps", label).Children
+            .Select((step, index) => AsMapping(step, $"{label} step {index}"))
+            .ToArray();
+        YamlMappingNode[] checkouts = steps.Where(step => OptionalScalar(step, "uses") == Checkout).ToArray();
+        Require(checkouts.Length == 1, "Reference prepare needs exactly one tag checkout.");
+        YamlMappingNode with = Mapping(checkouts[0], "with", label);
+        Require(Scalar(with, "ref", label) == "${{ steps.request.outputs.tag }}" &&
+                Scalar(with, "fetch-depth", label) == "0" &&
+                Scalar(with, "persist-credentials", label) == "false",
+            "Reference prepare must check out the requested tag with full history.");
+        Require(steps.Count(step => OptionalScalar(step, "id") == "evidence") == 1, "Reference prepare needs exactly one evidence step.");
+        string scripts = JoinScripts(prepare, label);
+        Require(scripts.Contains("actions/workflows/ci.yml", StringComparison.Ordinal) &&
+                scripts.Contains("actions/artifacts/$artifactId", StringComparison.Ordinal) &&
+                !scripts.Contains("Receive-VerifiedArtifact.ps1", StringComparison.Ordinal) &&
+                !Regex.IsMatch(scripts, @"(?i)\bdotnet\b", RegexOptions.CultureInvariant),
+            "Reference prepare must only freeze tag and candidate evidence.");
+    }
+
+    private static void ValidateReferenceVerification(YamlMappingNode verify)
+    {
+        const string label = "reference verify";
+        ValidateVerifiedCommitCheckout(verify, label);
+        YamlMappingNode[] steps = Sequence(verify, "steps", label).Children
+            .Select((step, index) => AsMapping(step, $"{label} step {index}"))
+            .ToArray();
+        YamlMappingNode receiver = steps.SingleOrDefault(step => OptionalScalar(step, "name") == "Receive and validate frozen reference candidate")
+            ?? throw new InvalidDataException("Reference verify needs one candidate receiver.");
+        Require(!steps.Any(step => OptionalScalar(step, "uses") is string action &&
+            action.StartsWith("actions/download-artifact@", StringComparison.Ordinal)),
+            "Reference verify may not use actions/download-artifact.");
+        YamlMappingNode receiverEnvironment = Mapping(receiver, "env", label);
+        Dictionary<string, string> expectedEnvironment = new(StringComparer.Ordinal)
+        {
+            ["EXPECTED_COMMIT"] = "${{ needs.prepare.outputs.commit }}",
+            ["EXPECTED_RUN_ID"] = "${{ needs.prepare.outputs.run-id }}",
+            ["EXPECTED_ARTIFACT_ID"] = "${{ needs.prepare.outputs.artifact-id }}",
+            ["EXPECTED_ARTIFACT_NAME"] = "${{ needs.prepare.outputs.artifact-name }}",
+            ["EXPECTED_ARTIFACT_DIGEST"] = "${{ needs.prepare.outputs.artifact-digest }}"
+        };
+        foreach ((string name, string value) in expectedEnvironment)
+            Require(Scalar(receiverEnvironment, name, label) == value, $"Reference verify environment differs: {name}.");
+        string receiverScript = Scalar(receiver, "run", label);
+        string scripts = JoinScripts(verify, label);
+        Dictionary<string, int> bindings = new(StringComparer.Ordinal)
+        {
+            ["-ArtifactId $env:EXPECTED_ARTIFACT_ID"] = 1,
+            ["-ExpectedArtifactName $env:EXPECTED_ARTIFACT_NAME"] = 2,
+            ["-ExpectedRunId $env:EXPECTED_RUN_ID"] = 2,
+            ["-ExpectedCommit $env:EXPECTED_COMMIT"] = 2,
+            ["-ExpectedDigest $env:EXPECTED_ARTIFACT_DIGEST"] = 1,
+            ["-CandidateKind Reference"] = 1
+        };
+        foreach ((string binding, int count) in bindings)
+            Require(Regex.Matches(receiverScript, Regex.Escape(binding), RegexOptions.CultureInvariant).Count == count,
+                $"Reference verify frozen evidence binding count differs: {binding}");
+        Require(scripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
+                scripts.Contains("dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror", StringComparison.Ordinal) &&
+                scripts.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) &&
+                scripts.Contains("scripts/Test-PublishedAssets.ps1", StringComparison.Ordinal),
+            "Reference verify must rebuild and compare the reference package.");
+    }
+
+    private static void ValidateReferenceFullTests(YamlMappingNode fullTests)
+    {
+        const string label = "reference full tests";
+        ValidateVerifiedCommitCheckout(fullTests, label);
+        Require(Scalar(fullTests, "name", label) == "Full tests (${{ matrix.shard }})", "Reference full-test job name must expose its shard.");
+        YamlMappingNode strategy = Mapping(fullTests, "strategy", label);
+        Require(Scalar(strategy, "fail-fast", label) == "false", "Reference full-test shards must all finish.");
+        YamlSequenceNode include = Sequence(Mapping(strategy, "matrix", label), "include", label);
+        Require(include.Children.Count == 4, "Reference full-test matrix must have four shards.");
+        Dictionary<string, string> shards = include.Children
+            .Select((entry, index) => AsMapping(entry, $"{label} shard {index}"))
+            .ToDictionary(
+                entry => Scalar(entry, "shard", label),
+                entry => Scalar(entry, "filter", label),
+                StringComparer.Ordinal);
+        Dictionary<string, string> expected = new(StringComparer.Ordinal)
+        {
+            ["1"] = "ReleaseShard=1",
+            ["2"] = "ReleaseShard=2",
+            ["3"] = "ReleaseShard=3",
+            ["remainder"] = "ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3"
+        };
+        Require(shards.Count == expected.Count && expected.All(pair =>
+                shards.TryGetValue(pair.Key, out string? filter) && filter == pair.Value),
+            "Reference full-test shard filters differ.");
+
+        YamlMappingNode[] steps = Sequence(fullTests, "steps", label).Children
+            .Select((step, index) => AsMapping(step, $"{label} step {index}"))
+            .ToArray();
+        YamlMappingNode testStep = steps.SingleOrDefault(step => OptionalScalar(step, "name") == "Build and run full test shard")
+            ?? throw new InvalidDataException("Reference full tests need one build-and-test step.");
+        Require(Scalar(Mapping(testStep, "env", label), "TEST_FILTER", label) == "${{ matrix.filter }}",
+            "Reference full tests must bind the matrix filter through the environment.");
+        string script = Scalar(testStep, "run", label);
+        Require(script.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
+                script.Contains("dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror", StringComparison.Ordinal) &&
+                script.Contains("dotnet test 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj'", StringComparison.Ordinal) &&
+                Regex.Matches(script, @"(?i)\bdotnet\s+test\b", RegexOptions.CultureInvariant).Count == 1 &&
+                script.Contains("--filter $env:TEST_FILTER", StringComparison.Ordinal) &&
+                !script.Contains("Category!=LongRunning", StringComparison.Ordinal),
+            "Reference full-test matrix must run every test through its assigned filter.");
+    }
+
+    private static void ValidateVerifiedCommitCheckout(YamlMappingNode job, string label)
+    {
+        YamlMappingNode[] checkouts = Sequence(job, "steps", label).Children
+            .Select((step, index) => AsMapping(step, $"{label} step {index}"))
+            .Where(step => OptionalScalar(step, "uses") == Checkout)
+            .ToArray();
+        Require(checkouts.Length == 1, $"{label} needs exactly one verified commit checkout.");
+        YamlMappingNode with = Mapping(checkouts[0], "with", label);
+        Require(Scalar(with, "ref", label) == "${{ needs.prepare.outputs.commit }}" &&
+                Scalar(with, "fetch-depth", label) == "0" &&
+                Scalar(with, "persist-credentials", label) == "false",
+            $"{label} must check out the prepared commit with full history and no persisted credentials.");
+    }
+
+    private static void ValidateReleaseShardAssignments()
+    {
+        Dictionary<(Type Type, string Method), string> expected = new()
+        {
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.CaptureRestoresAfterEveryOperationFailureThenRerunsToSuccess))] = "1",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.AttestationFailureCannotReturnSuccess))] = "1",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.NewReleaseIsPublishedByNumericIdAndAttestationsAreVerified))] = "1",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.EveryPersistedPhaseCanReenterRestoreAndConverge))] = "2",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.ActivateOldResumesEveryPhysicalAndJournalCrash))] = "2",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.ExistingPartialDraftUploadsOnlyMissingAssets))] = "2",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.ReferenceReleaseUsesTheSameVerifiedPublisher))] = "2",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.PublishedAssetMetadataMutationAfterPublicationIsRejected))] = "2",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.ActivateCurrentResumesEveryPhysicalAndJournalCrash))] = "3",
+            [(typeof(GameSwitchTests), nameof(GameSwitchTests.RestoreResumesEveryPhysicalAndJournalCrash))] = "3",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.ExactTagOnSecondPageIsFoundWithoutCreatingAnotherRelease))] = "3",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.PublishedAssetByteMutationAfterPublicationIsRejected))] = "3",
+            [(typeof(VerifiedReleasePublisherTests), nameof(VerifiedReleasePublisherTests.PublishedRerunSkipsMutationsAndReverifiesAttestations))] = "3"
+        };
+        HashSet<(Type Type, string Method)> seen = [];
+        foreach (Type type in typeof(WorkflowContractTests).Assembly.GetTypes())
+        {
+            Require(GetReleaseShards(type).Length == 0,
+                $"ReleaseShard must be assigned to methods, not the whole test class: {type.FullName}.");
+            foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+            {
+                string[] assignments = GetReleaseShards(method);
+                Require(assignments.Length <= 1, $"Test method has multiple release shards: {type.FullName}.{method.Name}.");
+                if (assignments.Length == 0)
+                    continue;
+                Require(assignments[0] is "1" or "2" or "3", $"Test method has an unknown release shard: {type.FullName}.{method.Name}.");
+                (Type Type, string Method) key = (type, method.Name);
+                if (expected.TryGetValue(key, out string? shard))
+                {
+                    Require(assignments[0] == shard, $"Release shard changed for {type.FullName}.{method.Name}.");
+                    seen.Add(key);
+                }
+            }
+        }
+        Require(seen.SetEquals(expected.Keys), "One or more release hotspot methods lost their shard assignment.");
+    }
+
+    private static string[] GetReleaseShards(MemberInfo member) =>
+        member.GetCustomAttributesData()
+            .Where(attribute => attribute.AttributeType == typeof(TraitAttribute) &&
+                attribute.ConstructorArguments.Count == 2 &&
+                attribute.ConstructorArguments[0].Value is string name &&
+                name == "ReleaseShard")
+            .Select(attribute => attribute.ConstructorArguments[1].Value as string ?? string.Empty)
+            .ToArray();
+
+    private static void ValidateAnnotatedEvidence(string text, string kind, string evidenceJob)
+    {
+        string expectedTagObject = "${{ needs." + evidenceJob + ".outputs.tag-object }}";
+        string expectedWorkflowId = "${{ needs." + evidenceJob + ".outputs.workflow-id }}";
         Require(text.Contains("cat-file -t", StringComparison.Ordinal) && text.Contains("-cne 'tag'", StringComparison.Ordinal), $"{kind} publish must reject lightweight tags.");
         Require(text.Contains("git/ref/tags/$env:REQUESTED_TAG", StringComparison.Ordinal) &&
                 !text.Contains("git ls-remote", StringComparison.Ordinal), $"{kind} publish must verify private-repository tags through the authenticated API.");
         Require(text.Contains("tag-object: ${{ steps.evidence.outputs.tag-object }}", StringComparison.Ordinal) &&
-                text.Contains("EXPECTED_TAG_OBJECT: ${{ needs.verify.outputs.tag-object }}", StringComparison.Ordinal) &&
+                text.Contains($"EXPECTED_TAG_OBJECT: {expectedTagObject}", StringComparison.Ordinal) &&
                 text.Contains("\"tag-object=$tagObject\" >> $env:GITHUB_OUTPUT", StringComparison.Ordinal), $"{kind} publish must carry the verified tag object across jobs.");
         Require(text.Contains("workflow-id: ${{ steps.evidence.outputs.workflow-id }}", StringComparison.Ordinal) &&
-                text.Contains("EXPECTED_WORKFLOW_ID: ${{ needs.verify.outputs.workflow-id }}", StringComparison.Ordinal) &&
+                text.Contains($"EXPECTED_WORKFLOW_ID: {expectedWorkflowId}", StringComparison.Ordinal) &&
                 text.Contains("\"workflow-id=$([long]$workflow.id)\" >> $env:GITHUB_OUTPUT", StringComparison.Ordinal), $"{kind} publish must carry the verified CI workflow id across jobs.");
         string artifactNamePattern = kind == "Reference"
             ? "^Candidate-Artifact-Name: (FarmTogether2\\.GameApi\\.Ref-candidate-[0-9a-f]{40})$"
@@ -679,13 +919,13 @@ public sealed class WorkflowContractTests
         {
             Require(scripts.Contains("FarmTogether2.GameApi.Ref.csproj", StringComparison.Ordinal) && scripts.Contains("$env:REQUESTED_TAG -cne \"v$([string]$versions[0])\"", StringComparison.Ordinal), $"{label} must bind tag to reference package version.");
         }
-        string[] receiverSteps = steps
-            .Select(step => OptionalScalar(step, "run"))
-            .Where(run => run is not null && run.Contains("Receive-VerifiedArtifact.ps1", StringComparison.Ordinal))
-            .Cast<string>()
+        YamlMappingNode[] receiverSteps = steps
+            .Where(step => OptionalScalar(step, "run")?.Contains(
+                "Receive-VerifiedArtifact.ps1",
+                StringComparison.Ordinal) == true)
             .ToArray();
         Require(receiverSteps.Length == 1, $"{label} needs exactly one receiver step.");
-        string receiverScript = receiverSteps[0];
+        string receiverScript = Scalar(receiverSteps[0], "run", label);
         string expectedKind = isReference ? "Reference" : "Mod";
         Match boundary = Regex.Match(
             receiverScript,
@@ -704,6 +944,53 @@ public sealed class WorkflowContractTests
                 candidateBlock.Contains("-ExpectedRunId $env:EXPECTED_RUN_ID", StringComparison.Ordinal) &&
                 candidateBlock.Contains("-ExpectedCommit $env:EXPECTED_COMMIT", StringComparison.Ordinal), $"{label} candidate verifier is not bound to frozen evidence.");
         Require(boundary.Groups["kind"].Value == expectedKind, $"{label} uses the wrong candidate kind.");
+        if (jobName == "publish")
+        {
+            string evidenceJob = isReference ? "prepare" : "verify";
+            Dictionary<string, string> expectedReceiverEnvironment = new(StringComparer.Ordinal)
+            {
+                ["EXPECTED_COMMIT"] = $"${{{{ needs.{evidenceJob}.outputs.commit }}}}",
+                ["EXPECTED_RUN_ID"] = $"${{{{ needs.{evidenceJob}.outputs.run-id }}}}",
+                ["EXPECTED_ARTIFACT_ID"] = $"${{{{ needs.{evidenceJob}.outputs.artifact-id }}}}",
+                ["EXPECTED_ARTIFACT_NAME"] = $"${{{{ needs.{evidenceJob}.outputs.artifact-name }}}}",
+                ["EXPECTED_ARTIFACT_DIGEST"] = $"${{{{ needs.{evidenceJob}.outputs.artifact-digest }}}}"
+            };
+            YamlMappingNode receiverEnvironment = Mapping(receiverSteps[0], "env", label);
+            foreach ((string name, string value) in expectedReceiverEnvironment)
+                Require(Scalar(receiverEnvironment, name, label) == value,
+                    $"{label} receiver environment differs: {name}.");
+
+            YamlMappingNode[] evidenceSteps = steps
+                .Where(step => OptionalScalar(step, "run")?.Contains(
+                    "actions/workflows/$expectedWorkflowId",
+                    StringComparison.Ordinal) == true)
+                .ToArray();
+            Require(evidenceSteps.Length == 1, $"{label} needs exactly one frozen-evidence re-query step.");
+            Dictionary<string, string> expectedEvidenceEnvironment = new(expectedReceiverEnvironment, StringComparer.Ordinal)
+            {
+                ["EXPECTED_TAG_OBJECT"] = $"${{{{ needs.{evidenceJob}.outputs.tag-object }}}}",
+                ["EXPECTED_WORKFLOW_ID"] = $"${{{{ needs.{evidenceJob}.outputs.workflow-id }}}}"
+            };
+            YamlMappingNode evidenceEnvironment = Mapping(evidenceSteps[0], "env", label);
+            foreach ((string name, string value) in expectedEvidenceEnvironment)
+                Require(Scalar(evidenceEnvironment, name, label) == value,
+                    $"{label} frozen-evidence environment differs: {name}.");
+
+            YamlMappingNode[] publisherSteps = steps
+                .Where(step => OptionalScalar(step, "run")?.Contains(
+                    "Publish-VerifiedRelease.ps1",
+                    StringComparison.Ordinal) == true)
+                .ToArray();
+            Require(publisherSteps.Length == 1, $"{label} needs exactly one verified publisher step.");
+            YamlMappingNode publisherEnvironment = Mapping(publisherSteps[0], "env", label);
+            Require(Scalar(publisherEnvironment, "RELEASE_TAG", label) ==
+                    $"${{{{ needs.{evidenceJob}.outputs.tag }}}}" &&
+                    Scalar(publisherEnvironment, "EXPECTED_TAG_OBJECT", label) ==
+                    $"${{{{ needs.{evidenceJob}.outputs.tag-object }}}}" &&
+                    Scalar(publisherEnvironment, "EXPECTED_COMMIT", label) ==
+                    $"${{{{ needs.{evidenceJob}.outputs.commit }}}}",
+                $"{label} publisher environment is not bound to frozen evidence.");
+        }
         Require(scripts.Contains("$tagType[0].Trim() -cne 'tag'", StringComparison.Ordinal), $"{label} must reject lightweight tags.");
         Require(scripts.Contains("[string]$run.head_branch -cne 'main'", StringComparison.Ordinal), $"{label} must require a main-push candidate run.");
         Require(scripts.Contains("[string]$run.path -cne '.github/workflows/ci.yml'", StringComparison.Ordinal), $"{label} must require the repository CI workflow path.");

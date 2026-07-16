@@ -14,7 +14,14 @@ public sealed class RefPackageTests
     private const string Version = "1.0.0";
     private static readonly DateTime FixedTimestamp = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-    private static readonly string ToolProject = Path.Combine(Root, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj");
+    private static readonly string ToolAssembly = Path.Combine(
+        Root,
+        "tools",
+        "FarmTogether2.ModKit.Tool",
+        "bin",
+        TestBuildConfiguration.Current,
+        "net8.0",
+        "FarmTogether2.ModKit.Tool.dll");
     private static readonly IReadOnlyDictionary<string, Version> Assemblies =
         new Dictionary<string, Version>(StringComparer.Ordinal)
         {
@@ -151,15 +158,7 @@ public sealed class RefPackageTests
         SortedDictionary<string, byte[]> entries = new(StringComparer.Ordinal);
         for (int index = 0; index < ushort.MaxValue; index++)
             entries.Add(index.ToString("D5", System.Globalization.CultureInfo.InvariantCulture), []);
-        string toolAssembly = Path.Combine(
-            Root,
-            "tools",
-            "FarmTogether2.ModKit.Tool",
-            "bin",
-            TestBuildConfiguration.Current,
-            "net8.0",
-            "FarmTogether2.ModKit.Tool.dll");
-        System.Reflection.Assembly tool = System.Reflection.Assembly.LoadFrom(toolAssembly);
+        System.Reflection.Assembly tool = System.Reflection.Assembly.LoadFrom(ToolAssembly);
         Type writer = tool.GetType("FarmTogether2.ModKit.Tool.CanonicalZipWriter", throwOnError: true)!;
         System.Reflection.MethodInfo method = Assert.Single(writer.GetMethods(
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static),
@@ -501,7 +500,7 @@ public sealed class RefPackageTests
             string package = Path.Combine(outputRoot, $"{PackageId}.{version}.nupkg");
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
+                ToolAssembly,
                 "ref-package", "write",
                 "--output", package,
                 "--package-id", PackageId,
@@ -565,7 +564,7 @@ public sealed class RefPackageTests
         {
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
+                ToolAssembly,
                 "ref-package", "verify",
                 "--package", package,
                 "--package-id", PackageId,
