@@ -112,8 +112,8 @@ public sealed class WorkflowContractTests
         { PublishPath, "-CandidateKind Mod", "-CandidateKind Reference", "wrong mod candidate kind" },
         { ReferenceReleasePath, "scripts/Pack-GameApiRef.ps1", "dotnet pack", "noncanonical reference writer" },
         { ReferenceReleasePath, "    needs: [prepare, verify, full-tests]", "    needs: [prepare, verify]", "release publication ignores full tests" },
-        { ReferenceReleasePath, "          - shard: 4\n            filter: ReleaseShard=4", "          - shard: missing\n            filter: ReleaseShard=missing", "release test shard missing" },
-        { ReferenceReleasePath, "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4", "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3", "release remainder overlaps a shard" },
+        { ReferenceReleasePath, "          - shard: 6\n            filter: ReleaseShard=6", "          - shard: missing\n            filter: ReleaseShard=missing", "release test shard missing" },
+        { ReferenceReleasePath, "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5&ReleaseShard!=6", "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5", "release remainder overlaps a shard" },
         { ReferenceReleasePath, "--filter $env:TEST_FILTER", "--filter 'Category!=LongRunning'", "release skipped long-running tests" },
         { ReferenceReleasePath, "    timeout-minutes: 30", "    timeout-minutes: 31", "release job timeout weakened" },
         { ReferenceReleasePath, "          dotnet-version: 8.0.x\n          global-json-file: global.json", "          global-json-file: global.json", "release job lacks .NET 8 runtime" },
@@ -752,7 +752,7 @@ public sealed class WorkflowContractTests
         YamlMappingNode strategy = Mapping(fullTests, "strategy", label);
         Require(Scalar(strategy, "fail-fast", label) == "false", "Reference full-test shards must all finish.");
         YamlSequenceNode include = Sequence(Mapping(strategy, "matrix", label), "include", label);
-        Require(include.Children.Count == 5, "Reference full-test matrix must have five shards.");
+        Require(include.Children.Count == 7, "Reference full-test matrix must have seven shards.");
         Dictionary<string, string> shards = include.Children
             .Select((entry, index) => AsMapping(entry, $"{label} shard {index}"))
             .ToDictionary(
@@ -765,7 +765,9 @@ public sealed class WorkflowContractTests
             ["2"] = "ReleaseShard=2",
             ["3"] = "ReleaseShard=3",
             ["4"] = "ReleaseShard=4",
-            ["remainder"] = "ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4"
+            ["5"] = "ReleaseShard=5",
+            ["6"] = "ReleaseShard=6",
+            ["remainder"] = "ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5&ReleaseShard!=6"
         };
         Require(shards.Count == expected.Count && expected.All(pair =>
                 shards.TryGetValue(pair.Key, out string? filter) && filter == pair.Value),
@@ -804,6 +806,11 @@ public sealed class WorkflowContractTests
 
     private static void ValidateReleaseShardAssignments()
     {
+        Dictionary<Type, string> expectedClasses = new()
+        {
+            [typeof(ModKitResolverTests)] = "5",
+            [typeof(PackModScriptTests)] = "6"
+        };
         Dictionary<(Type Type, string Method), string> expected = new()
         {
             [(typeof(GameSwitchTests), nameof(GameSwitchTests.CaptureRestoresAfterEveryOperationFailureThenRerunsToSuccess))] = "1",
@@ -825,18 +832,30 @@ public sealed class WorkflowContractTests
             [(typeof(GameSwitchTests), nameof(GameSwitchTests.ClosedJournalRejectsJsonValuesWithWrongTypesBeforeMutation))] = "4",
             [(typeof(GameSwitchTests), nameof(GameSwitchTests.CompletedSnapshotRejectsDuplicateOrWrongJsonTypes))] = "4"
         };
+        HashSet<Type> seenClasses = [];
         HashSet<(Type Type, string Method)> seen = [];
         foreach (Type type in typeof(WorkflowContractTests).Assembly.GetTypes())
         {
-            Require(GetReleaseShards(type).Length == 0,
-                $"ReleaseShard must be assigned to methods, not the whole test class: {type.FullName}.");
+            string[] classAssignments = GetReleaseShards(type);
+            Require(classAssignments.Length <= 1, $"Test class has multiple release shards: {type.FullName}.");
+            if (expectedClasses.TryGetValue(type, out string? expectedClassShard))
+            {
+                Require(classAssignments.Length == 1 && classAssignments[0] == expectedClassShard,
+                    $"Release shard changed for test class {type.FullName}.");
+                seenClasses.Add(type);
+            }
+            else
+            {
+                Require(classAssignments.Length == 0, $"Unexpected test class release shard: {type.FullName}.");
+            }
             foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
             {
                 string[] assignments = GetReleaseShards(method);
                 Require(assignments.Length <= 1, $"Test method has multiple release shards: {type.FullName}.{method.Name}.");
                 if (assignments.Length == 0)
                     continue;
-                Require(assignments[0] is "1" or "2" or "3" or "4", $"Test method has an unknown release shard: {type.FullName}.{method.Name}.");
+                Require(classAssignments.Length == 0, $"Test cannot have class and method release shards: {type.FullName}.{method.Name}.");
+                Require(assignments[0] is "1" or "2" or "3" or "4" or "5" or "6", $"Test method has an unknown release shard: {type.FullName}.{method.Name}.");
                 (Type Type, string Method) key = (type, method.Name);
                 if (expected.TryGetValue(key, out string? shard))
                 {
@@ -845,6 +864,7 @@ public sealed class WorkflowContractTests
                 }
             }
         }
+        Require(seenClasses.SetEquals(expectedClasses.Keys), "One or more release test classes lost their shard assignment.");
         Require(seen.SetEquals(expected.Keys), "One or more release hotspot methods lost their shard assignment.");
     }
 

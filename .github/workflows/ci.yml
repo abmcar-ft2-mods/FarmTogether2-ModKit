@@ -180,8 +180,12 @@ jobs:
             filter: ReleaseShard=3
           - shard: 4
             filter: ReleaseShard=4
+          - shard: 5
+            filter: ReleaseShard=5
+          - shard: 6
+            filter: ReleaseShard=6
           - shard: remainder
-            filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4
+            filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5&ReleaseShard!=6
     steps:
       - name: Check out complete repository history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
