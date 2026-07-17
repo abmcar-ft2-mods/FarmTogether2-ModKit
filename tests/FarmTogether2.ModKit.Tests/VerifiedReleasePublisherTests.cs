@@ -13,9 +13,19 @@ public sealed class VerifiedReleasePublisherTests
     private const string TagObject = "1111111111111111111111111111111111111111";
     private const string Commit = "2222222222222222222222222222222222222222";
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-    private static readonly string Publisher = Path.Combine(Root, "scripts", "Publish-VerifiedRelease.ps1");
+    private static readonly string PublisherSource = Path.Combine(Root, "scripts", "Publish-VerifiedRelease.ps1");
+    private static readonly string PublishedAssetsSource = Path.Combine(Root, "scripts", "Test-PublishedAssets.ps1");
+    private static readonly string ToolAssembly = Path.Combine(
+        Root,
+        "tools",
+        "FarmTogether2.ModKit.Tool",
+        "bin",
+        TestBuildConfiguration.Current,
+        "net8.0",
+        "FarmTogether2.ModKit.Tool.dll");
 
     [Fact]
+    [Trait("ReleaseShard", "1")]
     public void NewReleaseIsPublishedByNumericIdAndAttestationsAreVerified()
     {
         using Fixture fixture = new();
@@ -34,19 +44,10 @@ public sealed class VerifiedReleasePublisherTests
         Assert.DoesNotContain("release\tedit", log, StringComparison.Ordinal);
         Assert.Contains("release\tverify\tv1.2.3\t--repo\towner/repository", log, StringComparison.Ordinal);
         Assert.Equal(3, Count(log, "release\tverify-asset\tv1.2.3\t"));
-        string headCommitExpression = OperatingSystem.IsWindows() ? "HEAD{commit}" : "HEAD^{commit}";
-        string[] logLines = log.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-        Assert.Contains(
-            logLines,
-            line => line.StartsWith("git\t--no-replace-objects\t-C\t", StringComparison.Ordinal) &&
-                line.EndsWith($"\trev-parse\t--verify\t{headCommitExpression}", StringComparison.Ordinal));
-        Assert.Contains(
-            logLines,
-            line => line.StartsWith("git-real\t--no-replace-objects\t-C\t", StringComparison.Ordinal) &&
-                line.EndsWith("\trev-parse\t--verify\tHEAD^{commit}", StringComparison.Ordinal));
     }
 
     [Fact]
+    [Trait("ReleaseShard", "2")]
     public void ReferenceReleaseUsesTheSameVerifiedPublisher()
     {
         using Fixture fixture = new("Reference");
@@ -63,6 +64,7 @@ public sealed class VerifiedReleasePublisherTests
     }
 
     [Fact]
+    [Trait("ReleaseShard", "2")]
     public void ExistingPartialDraftUploadsOnlyMissingAssets()
     {
         using Fixture fixture = new();
@@ -78,6 +80,7 @@ public sealed class VerifiedReleasePublisherTests
     }
 
     [Fact]
+    [Trait("ReleaseShard", "3")]
     public void PublishedRerunSkipsMutationsAndReverifiesAttestations()
     {
         using Fixture fixture = new();
@@ -170,6 +173,7 @@ public sealed class VerifiedReleasePublisherTests
     }
 
     [Fact]
+    [Trait("ReleaseShard", "3")]
     public void ExactTagOnSecondPageIsFoundWithoutCreatingAnotherRelease()
     {
         using Fixture fixture = new();
@@ -275,6 +279,7 @@ public sealed class VerifiedReleasePublisherTests
     }
 
     [Fact]
+    [Trait("ReleaseShard", "2")]
     public void PublishedAssetMetadataMutationAfterPublicationIsRejected()
     {
         using Fixture fixture = new();
@@ -289,6 +294,7 @@ public sealed class VerifiedReleasePublisherTests
     }
 
     [Fact]
+    [Trait("ReleaseShard", "3")]
     public void PublishedAssetByteMutationAfterPublicationIsRejected()
     {
         using Fixture fixture = new();
@@ -317,6 +323,7 @@ public sealed class VerifiedReleasePublisherTests
     [Theory]
     [InlineData("FailReleaseVerify", "Release attestation")]
     [InlineData("FailAssetVerify", "asset attestation")]
+    [Trait("ReleaseShard", "1")]
     public void AttestationFailureCannotReturnSuccess(string failure, string expectedError)
     {
         using Fixture fixture = new();
@@ -356,6 +363,7 @@ public sealed class VerifiedReleasePublisherTests
         private readonly string _log;
         private readonly string _working;
         private readonly string _candidateKind;
+        private readonly string _publisher;
 
         public Fixture(string candidateKind = "Mod")
         {
@@ -368,9 +376,18 @@ public sealed class VerifiedReleasePublisherTests
             _state = Path.Combine(_root, "state.json");
             _log = Path.Combine(_root, "commands.log");
             _working = Path.Combine(_root, "working");
+            string scripts = Path.Combine(_root, "scripts");
+            _publisher = Path.Combine(scripts, "Publish-VerifiedRelease.ps1");
             Directory.CreateDirectory(_candidate);
             Directory.CreateDirectory(_remote);
             Directory.CreateDirectory(_shim);
+            Directory.CreateDirectory(scripts);
+            File.Copy(PublisherSource, _publisher);
+            File.Copy(PublishedAssetsSource, Path.Combine(scripts, "Test-PublishedAssets.ps1"));
+            File.WriteAllText(
+                Path.Combine(scripts, "Invoke-ModKitTool.ps1"),
+                FakeToolRunnerScript,
+                new UTF8Encoding(false));
             WriteCandidate();
             WriteState();
             WriteShims();
@@ -387,7 +404,7 @@ public sealed class VerifiedReleasePublisherTests
             };
             string[] arguments =
             [
-                "-NoLogo", "-NoProfile", "-File", Publisher,
+                "-NoLogo", "-NoProfile", "-File", _publisher,
                 "-Repository", "owner/repository",
                 "-ReleaseTag", "v1.2.3",
                 "-ExpectedTagObject", TagObject,
@@ -404,7 +421,7 @@ public sealed class VerifiedReleasePublisherTests
             startInfo.Environment["FAKE_RELEASE_LOG"] = _log;
             startInfo.Environment["FAKE_TAG_OBJECT"] = TagObject;
             startInfo.Environment["FAKE_COMMIT"] = Commit;
-            startInfo.Environment["FAKE_REAL_GIT"] = ResolveCommand("git");
+            startInfo.Environment["FAKE_TOOL_ASSEMBLY"] = ToolAssembly;
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start PowerShell.");
             string output = process.StandardOutput.ReadToEnd();
             string error = process.StandardError.ReadToEnd();
@@ -585,22 +602,6 @@ public sealed class VerifiedReleasePublisherTests
             }
         }
 
-        private static string ResolveCommand(string name)
-        {
-            ProcessStartInfo startInfo = new(OperatingSystem.IsWindows() ? "where.exe" : "which")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            };
-            startInfo.ArgumentList.Add(name);
-            using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Unable to locate {name}.");
-            string output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0) throw new InvalidOperationException($"Unable to locate {name}.");
-            return output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[0];
-        }
-
         private static string Sha256(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
     }
 
@@ -644,20 +645,23 @@ if ($Arguments.Count -eq 3 -and $Arguments[0] -ceq 'rev-parse' -and $Arguments[1
     $env:FAKE_COMMIT
     exit 0
 }
-$realArguments = @($Arguments)
-if ($IsWindows -and
-    $realArguments.Count -eq 6 -and
-    $realArguments[0] -ceq '--no-replace-objects' -and
-    $realArguments[1] -ceq '-C' -and
-    $realArguments[3] -ceq 'rev-parse' -and
-    $realArguments[4] -ceq '--verify' -and
-    $realArguments[5] -ceq 'HEAD{commit}') {
-    # cmd.exe consumes the caret before %* reaches this test double.
-    $realArguments[5] = 'HEAD^{commit}'
-}
-Add-Content -LiteralPath $env:FAKE_RELEASE_LOG -Value ("git-real`t" + ($realArguments -join "`t"))
-& $env:FAKE_REAL_GIT @realArguments
-exit $LASTEXITCODE
+[Console]::Error.WriteLine("unsupported git call: $($Arguments -join ' ')")
+exit 9
+""";
+
+    // ToolRunnerTests cover the isolated source build; publisher tests use the already-built tool.
+    private const string FakeToolRunnerScript = """
+#requires -Version 7.0
+[CmdletBinding()]
+param(
+    [Parameter(ValueFromRemainingArguments)][string[]]$ToolArguments
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
+& dotnet $env:FAKE_TOOL_ASSEMBLY @ToolArguments
+if ($LASTEXITCODE -ne 0) { throw "ModKit tool returned exit code $LASTEXITCODE." }
 """;
 
     private const string FakeGhScript = """

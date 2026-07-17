@@ -7,7 +7,14 @@ namespace FarmTogether2.ModKit.Tests;
 public sealed class LockResolverTests
 {
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-    private static readonly string ToolProject = Path.Combine(Root, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj");
+    private static readonly string ToolAssembly = Path.Combine(
+        Root,
+        "tools",
+        "FarmTogether2.ModKit.Tool",
+        "bin",
+        TestBuildConfiguration.Current,
+        "net8.0",
+        "FarmTogether2.ModKit.Tool.dll");
     private const string Commit = "0123456789abcdef0123456789abcdef01234567";
     private const string Hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -168,10 +175,7 @@ public sealed class LockResolverTests
                 RedirectStandardError = true,
                 UseShellExecute = false
             };
-            foreach (string argument in new[]
-                     {
-                         "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--"
-                     }.Concat(toolArguments))
+            foreach (string argument in new[] { ToolAssembly }.Concat(toolArguments))
                 startInfo.ArgumentList.Add(argument);
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start dotnet.");
             string stdout = process.StandardOutput.ReadToEnd();

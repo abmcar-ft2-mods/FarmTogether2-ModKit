@@ -255,6 +255,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(ActivateOldCrashPoints))]
+    [Trait("ReleaseShard", "2")]
     public void ActivateOldResumesEveryPhysicalAndJournalCrash(string crashPoint)
     {
         using Fixture fixture = new();
@@ -267,6 +268,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(ActivateCurrentCrashPoints))]
+    [Trait("ReleaseShard", "3")]
     public void ActivateCurrentResumesEveryPhysicalAndJournalCrash(string crashPoint)
     {
         using Fixture fixture = new();
@@ -283,6 +285,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(RestoreCrashPoints))]
+    [Trait("ReleaseShard", "3")]
     public void RestoreResumesEveryPhysicalAndJournalCrash(string crashPoint)
     {
         using Fixture fixture = new();
@@ -297,6 +300,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(RestorePhaseEntryPoints))]
+    [Trait("ReleaseShard", "2")]
     public void EveryPersistedPhaseCanReenterRestoreAndConverge(string phase, string route)
     {
         using Fixture fixture = new();
@@ -386,6 +390,7 @@ public sealed class GameSwitchTests
     [InlineData("state-flags", "outside the permitted")]
     [InlineData("install-directory", "outside the permitted")]
     [InlineData("whitespace", "outside the permitted")]
+    [Trait("ReleaseShard", "4")]
     public void RestoreRejectsEveryOtherAppManifestIdentityOrByteChange(string change, string expectedError)
     {
         using Fixture fixture = new();
@@ -430,6 +435,7 @@ public sealed class GameSwitchTests
     [Theory]
     [InlineData("ActivateOld", false)]
     [InlineData("ActivateCurrent", true)]
+    [Trait("ReleaseShard", "4")]
     public void LegacyActiveStateMigrationIsPersistedEvenWhenTheActionHasNoPhaseTransition(string action, bool currentActive)
     {
         using Fixture fixture = new();
@@ -511,6 +517,7 @@ public sealed class GameSwitchTests
     [InlineData("phase")]
     [InlineData("currentHashes")]
     [InlineData("currentDepotManifests")]
+    [Trait("ReleaseShard", "4")]
     public void ClosedJournalRejectsDuplicateJsonPropertiesAtEveryRelevantDepth(string scope)
     {
         using Fixture fixture = new();
@@ -531,6 +538,7 @@ public sealed class GameSwitchTests
     [InlineData("currentManifestId")]
     [InlineData("currentDepotManifests")]
     [InlineData("saveWasPresent")]
+    [Trait("ReleaseShard", "4")]
     public void ClosedJournalRejectsJsonValuesWithWrongTypesBeforeMutation(string field)
     {
         using Fixture fixture = new();
@@ -698,6 +706,7 @@ public sealed class GameSwitchTests
 
     [Theory]
     [MemberData(nameof(CaptureCrashPoints))]
+    [Trait("ReleaseShard", "1")]
     public void CaptureRestoresAfterEveryOperationFailureThenRerunsToSuccess(string crashPoint, string priorState)
     {
         using Fixture fixture = new();
@@ -773,6 +782,7 @@ public sealed class GameSwitchTests
     [Theory]
     [InlineData("duplicate")]
     [InlineData("string-schema")]
+    [Trait("ReleaseShard", "4")]
     public void CompletedSnapshotRejectsDuplicateOrWrongJsonTypes(string corruption)
     {
         using Fixture fixture = new();

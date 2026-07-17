@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
+  prepare:
     runs-on: windows-2025
     permissions:
       actions: read
@@ -54,18 +54,6 @@ jobs:
           ref: ${{ steps.request.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up locked .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
-        with:
-          dotnet-version: 8.0.x
-          global-json-file: global.json
-      - name: Assert exact .NET SDK
-        shell: pwsh
-        run: |
-          $requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version
-          if ((dotnet --version).Trim() -cne $requiredVersion) {
-            throw "Exact .NET SDK $requiredVersion is required."
-          }
       - name: Parse annotated reference candidate evidence
         id: evidence
         shell: pwsh
@@ -155,15 +143,42 @@ jobs:
           "artifact-id=$artifactId" >> $env:GITHUB_OUTPUT
           "artifact-name=$artifactName" >> $env:GITHUB_OUTPUT
           "artifact-digest=$digest" >> $env:GITHUB_OUTPUT
+
+  verify:
+    needs: prepare
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out verified reference commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up locked .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 8.0.x
+          global-json-file: global.json
+      - name: Assert exact .NET SDK
+        shell: pwsh
+        run: |
+          $requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version
+          if ((dotnet --version).Trim() -cne $requiredVersion) {
+            throw "Exact .NET SDK $requiredVersion is required."
+          }
       - name: Receive and validate frozen reference candidate
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_COMMIT: ${{ steps.evidence.outputs.commit }}
-          EXPECTED_RUN_ID: ${{ steps.evidence.outputs.run-id }}
-          EXPECTED_ARTIFACT_ID: ${{ steps.evidence.outputs.artifact-id }}
-          EXPECTED_ARTIFACT_NAME: ${{ steps.evidence.outputs.artifact-name }}
-          EXPECTED_ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_RUN_ID: ${{ needs.prepare.outputs.run-id }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact-name }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact-digest }}
           REPOSITORY: ${{ github.repository }}
         run: |
           New-Item -ItemType Directory -Path 'artifacts/verify-evidence' | Out-Null
@@ -191,8 +206,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Independent restore failed with exit code $LASTEXITCODE." }
           & dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror
           if ($LASTEXITCODE -ne 0) { throw "Independent rebuild failed with exit code $LASTEXITCODE." }
-          & dotnet test 'FarmTogether2-ModKit.sln' -c Release --no-build --no-restore
-          if ($LASTEXITCODE -ne 0) { throw "Independent tests failed with exit code $LASTEXITCODE." }
           New-Item -ItemType Directory -Path 'artifacts/ref-rebuild' | Out-Null
           $output = @(& 'scripts/Pack-GameApiRef.ps1' -Configuration Release -OutputDirectory 'artifacts/ref-rebuild' -NoBuild)
           if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) { throw 'Independent reference package writer failed.' }
@@ -208,9 +221,66 @@ jobs:
             -CandidateKind Reference
           if ($LASTEXITCODE -ne 0) { throw "Rebuilt reference assets differ from the frozen candidate: $LASTEXITCODE." }
 
-  publish:
-    needs: verify
+  full-tests:
+    needs: prepare
+    name: Full tests (${{ matrix.shard }})
     runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            filter: ReleaseShard=1
+          - shard: 2
+            filter: ReleaseShard=2
+          - shard: 3
+            filter: ReleaseShard=3
+          - shard: 4
+            filter: ReleaseShard=4
+          - shard: 5
+            filter: ReleaseShard=5
+          - shard: 6
+            filter: ReleaseShard=6
+          - shard: remainder
+            filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5&ReleaseShard!=6
+    steps:
+      - name: Check out verified reference commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up locked .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 8.0.x
+          global-json-file: global.json
+      - name: Assert exact .NET SDK
+        shell: pwsh
+        run: |
+          $requiredVersion = (Get-Content -LiteralPath 'global.json' -Raw | ConvertFrom-Json).sdk.version
+          if ((dotnet --version).Trim() -cne $requiredVersion) {
+            throw "Exact .NET SDK $requiredVersion is required."
+          }
+      - name: Build and run full test shard
+        shell: pwsh
+        env:
+          TEST_FILTER: ${{ matrix.filter }}
+        run: |
+          & dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode
+          if ($LASTEXITCODE -ne 0) { throw "Test restore failed with exit code $LASTEXITCODE." }
+          & dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "Test build failed with exit code $LASTEXITCODE." }
+          & dotnet test 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj' -c Release --no-build --no-restore --filter $env:TEST_FILTER
+          if ($LASTEXITCODE -ne 0) { throw "Test shard failed with exit code $LASTEXITCODE." }
+
+  publish:
+    needs: [prepare, verify, full-tests]
+    runs-on: windows-2025
+    timeout-minutes: 30
     permissions:
       actions: read
       attestations: read
@@ -221,7 +291,7 @@ jobs:
         shell: pwsh
         env:
           REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          VERIFIED_TAG: ${{ needs.verify.outputs.tag }}
+          VERIFIED_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           if ($env:REQUESTED_TAG -cne $env:VERIFIED_TAG -or
               $env:REQUESTED_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
@@ -251,13 +321,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ steps.request.outputs.tag }}
-          EXPECTED_TAG_OBJECT: ${{ needs.verify.outputs.tag-object }}
-          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
-          EXPECTED_WORKFLOW_ID: ${{ needs.verify.outputs.workflow-id }}
-          EXPECTED_RUN_ID: ${{ needs.verify.outputs.run-id }}
-          EXPECTED_ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
-          EXPECTED_ARTIFACT_NAME: ${{ needs.verify.outputs.artifact-name }}
-          EXPECTED_ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
+          EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag-object }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_WORKFLOW_ID: ${{ needs.prepare.outputs.workflow-id }}
+          EXPECTED_RUN_ID: ${{ needs.prepare.outputs.run-id }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact-name }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact-digest }}
           REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -326,11 +396,11 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
-          EXPECTED_RUN_ID: ${{ needs.verify.outputs.run-id }}
-          EXPECTED_ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
-          EXPECTED_ARTIFACT_NAME: ${{ needs.verify.outputs.artifact-name }}
-          EXPECTED_ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_RUN_ID: ${{ needs.prepare.outputs.run-id }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact-name }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact-digest }}
           REPOSITORY: ${{ github.repository }}
         run: |
           New-Item -ItemType Directory -Path 'artifacts/publish-evidence' | Out-Null
@@ -355,9 +425,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
-          EXPECTED_TAG_OBJECT: ${{ needs.verify.outputs.tag-object }}
-          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag-object }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
           REPOSITORY: ${{ github.repository }}
         run: |
           & 'scripts/Publish-VerifiedRelease.ps1' `

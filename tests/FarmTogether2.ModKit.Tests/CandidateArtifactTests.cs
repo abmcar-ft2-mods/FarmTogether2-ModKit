@@ -12,7 +12,14 @@ public sealed class CandidateArtifactTests
     private const string Commit = "0123456789abcdef0123456789abcdef01234567";
     private const long RunId = 123456789;
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-    private static readonly string ToolProject = Path.Combine(Root, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj");
+    private static readonly string ToolAssembly = Path.Combine(
+        Root,
+        "tools",
+        "FarmTogether2.ModKit.Tool",
+        "bin",
+        TestBuildConfiguration.Current,
+        "net8.0",
+        "FarmTogether2.ModKit.Tool.dll");
     private static readonly string CandidateScript = Path.Combine(Root, "scripts", "Test-Candidate.ps1");
     private static readonly string PublishedScript = Path.Combine(Root, "scripts", "Test-PublishedAssets.ps1");
 
@@ -237,7 +244,7 @@ public sealed class CandidateArtifactTests
         {
             return RunProcess(
                 "dotnet",
-                new[] { "run", "--project", ToolProject, "-c", "Release", "--no-build", "--" }.Concat(toolArguments));
+                new[] { ToolAssembly }.Concat(toolArguments));
         }
 
         private static ProcessResult RunProcess(string fileName, IEnumerable<string> arguments)

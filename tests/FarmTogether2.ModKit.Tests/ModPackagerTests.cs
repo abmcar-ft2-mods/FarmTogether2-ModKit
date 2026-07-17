@@ -14,7 +14,14 @@ public sealed class ModPackagerTests
     private const string Version = "1.2.3";
     private static readonly DateTime FixedTimestamp = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-    private static readonly string ToolProject = Path.Combine(Root, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj");
+    private static readonly string ToolAssembly = Path.Combine(
+        Root,
+        "tools",
+        "FarmTogether2.ModKit.Tool",
+        "bin",
+        TestBuildConfiguration.Current,
+        "net8.0",
+        "FarmTogether2.ModKit.Tool.dll");
 
     [Fact]
     public void WriterProducesByteIdenticalAllowlistedArchives()
@@ -351,7 +358,7 @@ public sealed class ModPackagerTests
                 RedirectStandardError = true,
                 UseShellExecute = false
             };
-            foreach (string argument in new[] { "run", "--project", ToolProject, "-c", "Release", "--no-build", "--" }.Concat(toolArguments))
+            foreach (string argument in new[] { ToolAssembly }.Concat(toolArguments))
                 startInfo.ArgumentList.Add(argument);
             using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start dotnet.");
             string stdout = process.StandardOutput.ReadToEnd();

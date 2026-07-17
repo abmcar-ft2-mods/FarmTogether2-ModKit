@@ -8,13 +8,21 @@ using Xunit;
 namespace FarmTogether2.ModKit.Tests;
 
 [Trait("Category", "LongRunning")]
+[Trait("ReleaseShard", "5")]
 public sealed class ModKitResolverTests
 {
     private const string Commit = "0123456789abcdef0123456789abcdef01234567";
     private const string AssetName = "FarmTogether2.GameApi.Ref.1.0.0.nupkg";
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
     private static readonly string Script = Path.Combine(Root, "scripts", "Resolve-ModKit.ps1");
-    private static readonly string ToolProject = Path.Combine(Root, "tools", "FarmTogether2.ModKit.Tool", "FarmTogether2.ModKit.Tool.csproj");
+    private static readonly string ToolAssembly = Path.Combine(
+        Root,
+        "tools",
+        "FarmTogether2.ModKit.Tool",
+        "bin",
+        TestBuildConfiguration.Current,
+        "net8.0",
+        "FarmTogether2.ModKit.Tool.dll");
     private static readonly IReadOnlyDictionary<string, Version> Assemblies =
         new Dictionary<string, Version>(StringComparer.Ordinal)
         {
@@ -675,7 +683,7 @@ public sealed class ModKitResolverTests
             Directory.CreateDirectory(assemblyRoot);
             List<string> arguments =
             [
-                "run", "--project", ToolProject, "-c", TestBuildConfiguration.Current, "--no-build", "--",
+                ToolAssembly,
                 "ref-package", "write",
                 "--output", AssetPath,
                 "--package-id", "FarmTogether2.GameApi.Ref",
