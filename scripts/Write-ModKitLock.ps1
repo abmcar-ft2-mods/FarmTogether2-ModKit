@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$RepositoryRoot,
-    [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$ModKitRepository = 'abmcar/FarmTogether2-ModKit',
+    [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$ModKitRepository = 'abmcar-ft2-mods/FarmTogether2-ModKit',
     [Parameter(Mandatory)][ValidatePattern('^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Tag,
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ExpectedReleaseManifest
 )

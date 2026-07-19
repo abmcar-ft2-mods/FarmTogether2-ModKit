@@ -33,7 +33,7 @@ public sealed class LockResolverTests
             """
             {
               "schemaVersion": 1,
-              "repository": "abmcar/FarmTogether2-ModKit",
+              "repository": "abmcar-ft2-mods/FarmTogether2-ModKit",
               "workflowCommit": "0123456789abcdef0123456789abcdef01234567",
               "packageId": "FarmTogether2.GameApi.Ref",
               "packageVersion": "1.0.0",
@@ -53,7 +53,7 @@ public sealed class LockResolverTests
         { "extra", CanonicalJson.Replace("}", ",\"extra\":true}", StringComparison.Ordinal) },
         { "wrong-schema-type", CanonicalJson.Replace("\"schemaVersion\":1", "\"schemaVersion\":\"1\"", StringComparison.Ordinal) },
         { "noncanonical-schema-number", CanonicalJson.Replace("\"schemaVersion\":1", "\"schemaVersion\":1.0", StringComparison.Ordinal) },
-        { "null", CanonicalJson.Replace("\"repository\":\"abmcar/FarmTogether2-ModKit\"", "\"repository\":null", StringComparison.Ordinal) },
+        { "null", CanonicalJson.Replace("\"repository\":\"abmcar-ft2-mods/FarmTogether2-ModKit\"", "\"repository\":null", StringComparison.Ordinal) },
         { "wrong-case", CanonicalJson.Replace("\"repository\"", "\"Repository\"", StringComparison.Ordinal) },
         { "nested", CanonicalJson.Replace("\"packageId\":\"FarmTogether2.GameApi.Ref\"", "\"packageId\":{\"id\":\"FarmTogether2.GameApi.Ref\"}", StringComparison.Ordinal) },
         { "uppercase-commit", CanonicalJson.Replace(Commit, Commit.ToUpperInvariant(), StringComparison.Ordinal) },
@@ -125,7 +125,7 @@ public sealed class LockResolverTests
 
     private const string CanonicalJson =
         "{\"schemaVersion\":1," +
-        "\"repository\":\"abmcar/FarmTogether2-ModKit\"," +
+        "\"repository\":\"abmcar-ft2-mods/FarmTogether2-ModKit\"," +
         "\"workflowCommit\":\"" + Commit + "\"," +
         "\"packageId\":\"FarmTogether2.GameApi.Ref\"," +
         "\"packageVersion\":\"1.0.0\"," +
@@ -152,7 +152,7 @@ public sealed class LockResolverTests
                 "lock", "write",
                 "--output", output ?? LockPath,
                 "--schema-version", "1",
-                "--repository", "abmcar/FarmTogether2-ModKit",
+                "--repository", "abmcar-ft2-mods/FarmTogether2-ModKit",
                 "--workflow-commit", Commit,
                 "--package-id", "FarmTogether2.GameApi.Ref",
                 "--package-version", "1.0.0",

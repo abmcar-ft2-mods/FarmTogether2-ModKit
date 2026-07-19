@@ -80,12 +80,12 @@ public sealed class ModKitResolverTests
 
     public static TheoryData<string[]> InvalidStoredRemoteUrls => new()
     {
-        new[] { "git@github.com:abmcar/FarmTogether2-ModKit.git" },
-        new[] { "https://github.com/abmcar/FarmTogether2-ModKit.git " },
+        new[] { "git@github.com:abmcar-ft2-mods/FarmTogether2-ModKit.git" },
+        new[] { "https://github.com/abmcar-ft2-mods/FarmTogether2-ModKit.git " },
         new[]
         {
-            "https://github.com/abmcar/FarmTogether2-ModKit.git",
-            "https://github.com/abmcar/FarmTogether2-ModKit.git"
+            "https://github.com/abmcar-ft2-mods/FarmTogether2-ModKit.git",
+            "https://github.com/abmcar-ft2-mods/FarmTogether2-ModKit.git"
         }
     };
 
@@ -507,7 +507,7 @@ public sealed class ModKitResolverTests
             var value = new
             {
                 schemaVersion = 1,
-                repository = "abmcar/FarmTogether2-ModKit",
+                repository = "abmcar-ft2-mods/FarmTogether2-ModKit",
                 workflowCommit = Commit,
                 packageId = "FarmTogether2.GameApi.Ref",
                 packageVersion = "1.0.0",
@@ -573,7 +573,7 @@ public sealed class ModKitResolverTests
             startInfo.Environment["FAKE_GIT_SOURCE"] = Root;
             startInfo.Environment["FAKE_GIT_HEAD"] = fetchedHead;
             startInfo.Environment["FAKE_GIT_STORED_REMOTE_URLS_JSON"] = JsonSerializer.Serialize(
-                storedRemoteUrls ?? new[] { "https://github.com/abmcar/FarmTogether2-ModKit.git" });
+                storedRemoteUrls ?? new[] { "https://github.com/abmcar-ft2-mods/FarmTogether2-ModKit.git" });
             startInfo.Environment["FAKE_GIT_STORED_REMOTE_READ_FAIL"] = storedRemoteReadFailure ? "1" : string.Empty;
             startInfo.Environment["TMPDIR"] = ResolverTemporaryRoot;
             startInfo.Environment["TMP"] = ResolverTemporaryRoot;

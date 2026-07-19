@@ -154,7 +154,7 @@ public sealed class ToolRunnerTests
             File.WriteAllText(LockFile, """
                 {
                   "schemaVersion": 1,
-                  "repository": "abmcar/FarmTogether2-ModKit",
+                  "repository": "abmcar-ft2-mods/FarmTogether2-ModKit",
                   "workflowCommit": "0123456789abcdef0123456789abcdef01234567",
                   "packageId": "FarmTogether2.GameApi.Ref",
                   "packageVersion": "1.0.0",

@@ -314,7 +314,7 @@ public sealed class WorkflowContractTests
                 string value = match.Groups[1].Value;
                 if (path == CallerCiPath || path == CallerReleasePath)
                 {
-                    Require(Regex.IsMatch(value, @"^abmcar/FarmTogether2-ModKit/\.github/workflows/reusable-mod-(?:build|publish)\.yml@[0-9a-f]{40}$"), $"{path} has a movable caller use.");
+                    Require(Regex.IsMatch(value, @"^abmcar-ft2-mods/FarmTogether2-ModKit/\.github/workflows/reusable-mod-(?:build|publish)\.yml@[0-9a-f]{40}$"), $"{path} has a movable caller use.");
                 }
                 else
                 {
@@ -355,7 +355,7 @@ public sealed class WorkflowContractTests
             string? token = OptionalScalar(with, "token");
             if (token is null)
                 continue;
-            Require(OptionalScalar(with, "repository") == "abmcar/FarmTogether2-ModKit" &&
+            Require(OptionalScalar(with, "repository") == "abmcar-ft2-mods/FarmTogether2-ModKit" &&
                     token == "${{ secrets.modkit_read_token }}",
                 $"{label} may pass the private ModKit read token only to the private bootstrap checkout.");
         }
@@ -500,7 +500,7 @@ public sealed class WorkflowContractTests
         Require(jobs.Children.Count == 1, "Dependabot auto-merge must have one job.");
         YamlMappingNode job = Mapping(jobs, "enable-auto-merge", DependabotAutoMergePath);
         Require(Scalar(job, "runs-on", DependabotAutoMergePath) == "ubuntu-latest", "Dependabot auto-merge runner differs.");
-        Require(Scalar(job, "if", DependabotAutoMergePath) == "github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar/FarmTogether2-ModKit'",
+        Require(Scalar(job, "if", DependabotAutoMergePath) == "github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar-ft2-mods/FarmTogether2-ModKit'",
             "Dependabot auto-merge actor or repository guard differs.");
 
         YamlSequenceNode steps = Sequence(job, "steps", DependabotAutoMergePath);
@@ -1149,12 +1149,12 @@ public sealed class WorkflowContractTests
         YamlMappingNode[] checkouts = Sequence(job, "steps", label).Children
             .Select((step, index) => AsMapping(step, $"{label} step {index}"))
             .Where(step => OptionalScalar(step, "uses") == Checkout &&
-                OptionalScalar(Mapping(step, "with", label, required: false), "repository") == "abmcar/FarmTogether2-ModKit")
+                OptionalScalar(Mapping(step, "with", label, required: false), "repository") == "abmcar-ft2-mods/FarmTogether2-ModKit")
             .ToArray();
         Require(checkouts.Length == 1, $"{label} needs exactly one private ModKit bootstrap checkout.");
         YamlMappingNode with = Mapping(checkouts[0], "with", label);
         Require(with.Children.Count == 5 &&
-                Scalar(with, "repository", label) == "abmcar/FarmTogether2-ModKit" &&
+                Scalar(with, "repository", label) == "abmcar-ft2-mods/FarmTogether2-ModKit" &&
                 Scalar(with, "ref", label) == "${{ inputs.modkit-commit }}" &&
                 Scalar(with, "token", label) == "${{ secrets.modkit_read_token }}" &&
                 Scalar(with, "path", label) == ".modkit/bootstrap" &&

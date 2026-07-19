@@ -366,6 +366,12 @@ function Test-DependabotAutoMergeWorkflow([string]$Text) {
         $Text,
         '(?m)^(?<prefix>\s*uses:\s*dependabot/fetch-metadata)@[0-9a-f]{40}\s*$',
         '${prefix}@__PIN__')
+    foreach ($repository in @('abmcar/FarmTogether2-ModKit', 'abmcar-ft2-mods/FarmTogether2-ModKit')) {
+        $normalized = $normalized.Replace(
+            "github.repository == '$repository'",
+            "github.repository == '__REPOSITORY__'",
+            [StringComparison]::Ordinal)
+    }
     $expected = @'
 name: Dependabot auto-merge
 
@@ -379,7 +385,7 @@ permissions:
 
 jobs:
   enable-auto-merge:
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar/FarmTogether2-ModKit'
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == '__REPOSITORY__'
     runs-on: ubuntu-latest
     steps:
       - name: Read Dependabot metadata

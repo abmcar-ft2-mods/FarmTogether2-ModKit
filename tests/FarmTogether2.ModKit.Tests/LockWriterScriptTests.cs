@@ -123,7 +123,7 @@ public sealed class LockWriterScriptTests
         string invalid = kind switch
         {
             "extra" => fixture.ManifestJson.Replace("}", ",\"extra\":true}", StringComparison.Ordinal),
-            "wrong-type" => fixture.ManifestJson.Replace("\"repository\": \"abmcar/FarmTogether2-ModKit\"", "\"repository\": 1", StringComparison.Ordinal),
+            "wrong-type" => fixture.ManifestJson.Replace("\"repository\": \"abmcar-ft2-mods/FarmTogether2-ModKit\"", "\"repository\": 1", StringComparison.Ordinal),
             "wrong-case" => fixture.ManifestJson.Replace("\"repository\"", "\"Repository\"", StringComparison.Ordinal),
             _ => throw new InvalidOperationException()
         };
@@ -188,7 +188,7 @@ public sealed class LockWriterScriptTests
             var manifest = new
             {
                 schemaVersion = 1,
-                repository = "abmcar/FarmTogether2-ModKit",
+                repository = "abmcar-ft2-mods/FarmTogether2-ModKit",
                 workflowCommit = Commit,
                 packageId = "FarmTogether2.GameApi.Ref",
                 packageVersion = "1.0.0",
@@ -249,7 +249,7 @@ public sealed class LockWriterScriptTests
             {
                 "-NoLogo", "-NoProfile", "-File", Script,
                 "-RepositoryRoot", RepositoryRoot,
-                "-ModKitRepository", "abmcar/FarmTogether2-ModKit",
+                "-ModKitRepository", "abmcar-ft2-mods/FarmTogether2-ModKit",
                 "-Tag", "v1.0.0",
                 "-ExpectedReleaseManifest", ManifestPath
             })

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   enable-auto-merge:
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar/FarmTogether2-ModKit'
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'abmcar-ft2-mods/FarmTogether2-ModKit'
     runs-on: ubuntu-latest
     steps:
       - name: Read Dependabot metadata

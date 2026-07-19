@@ -48,7 +48,7 @@ public sealed class CallerWorkflowContractTests
             File.WriteAllText(Path.Combine(Repository, "modkit.lock.json"), $$"""
                 {
                   "schemaVersion": 1,
-                  "repository": "abmcar/FarmTogether2-ModKit",
+                  "repository": "abmcar-ft2-mods/FarmTogether2-ModKit",
                   "workflowCommit": "{{Commit}}",
                   "packageId": "FarmTogether2.GameApi.Ref",
                   "packageVersion": "1.0.0",

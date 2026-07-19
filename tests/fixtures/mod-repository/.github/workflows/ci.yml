@@ -12,7 +12,7 @@ jobs:
   build:
     permissions:
       contents: read
-    uses: abmcar/FarmTogether2-ModKit/.github/workflows/reusable-mod-build.yml@0123456789abcdef0123456789abcdef01234567
+    uses: abmcar-ft2-mods/FarmTogether2-ModKit/.github/workflows/reusable-mod-build.yml@0123456789abcdef0123456789abcdef01234567
     with:
       modkit-commit: 0123456789abcdef0123456789abcdef01234567
       game-api-mode: Hosted

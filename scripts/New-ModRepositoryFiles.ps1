@@ -355,7 +355,7 @@ jobs:
   build:
     permissions:
       contents: read
-    uses: abmcar/FarmTogether2-ModKit/.github/workflows/reusable-mod-build.yml@__COMMIT__
+    uses: abmcar-ft2-mods/FarmTogether2-ModKit/.github/workflows/reusable-mod-build.yml@__COMMIT__
     with:
       modkit-commit: __COMMIT__
       game-api-mode: Hosted
@@ -386,7 +386,7 @@ jobs:
       actions: read
       attestations: read
       contents: write
-    uses: abmcar/FarmTogether2-ModKit/.github/workflows/reusable-mod-publish.yml@__COMMIT__
+    uses: abmcar-ft2-mods/FarmTogether2-ModKit/.github/workflows/reusable-mod-publish.yml@__COMMIT__
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       modkit-commit: __COMMIT__
