@@ -125,7 +125,8 @@ function Assert-LockValuesEqual([object]$Expected, [object]$Actual, [string]$Lab
 }
 
 function Invoke-Tool([string[]]$Arguments) {
-    & dotnet run --project $toolProject -c Release --no-restore -- @Arguments
+    Assert-RegularFile $toolAssembly 'Built ModKit lock tool'
+    & dotnet $toolAssembly @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "ModKit lock tool failed with exit code $LASTEXITCODE."
     }
@@ -286,10 +287,23 @@ try {
     $finalRelease = Get-ReleaseSnapshot $manifest
     Assert-ReleaseSnapshotEqual $initialRelease $finalRelease
 
+    $toolBuildRoot = Join-Path $temporaryRoot '.tool-build'
+    $toolOutput = Join-Path $toolBuildRoot 'bin'
+    Assert-NoReparseAncestor $toolBuildRoot 'ModKit lock tool build root'
+    [IO.Directory]::CreateDirectory($toolOutput) | Out-Null
+    Assert-NoReparseAncestor $toolBuildRoot 'ModKit lock tool build root'
+
     & dotnet restore $toolProject --locked-mode
     if ($LASTEXITCODE -ne 0) {
         throw 'Locked ModKit tool restore failed.'
     }
+    & dotnet build $toolProject -c Release --no-restore --output $toolOutput
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Isolated ModKit tool build failed.'
+    }
+    $toolAssembly = Join-Path $toolOutput 'FarmTogether2.ModKit.Tool.dll'
+    Assert-RegularFile $toolAssembly 'Built ModKit lock tool'
+
     Invoke-Tool @('lock', 'verify', '--file', $manifestPath)
     Invoke-Tool @(
         'ref-package', 'verify',

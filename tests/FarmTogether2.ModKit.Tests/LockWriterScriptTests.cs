@@ -20,7 +20,7 @@ public sealed class LockWriterScriptTests
         "FarmTogether2.ModKit.Tool",
         "bin",
         TestBuildConfiguration.Current,
-        "net8.0",
+        "net10.0",
         "FarmTogether2.ModKit.Tool.dll");
     private static readonly IReadOnlyDictionary<string, Version> Assemblies =
         new Dictionary<string, Version>(StringComparer.Ordinal)
@@ -38,9 +38,14 @@ public sealed class LockWriterScriptTests
     public void WriterBindsManifestTagReleaseCommitAssetAndHashBeforeLockPromotion()
     {
         using Fixture fixture = new();
+        string toolHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(ToolAssembly)));
+        using FileStream? sharedToolLock = OperatingSystem.IsWindows()
+            ? new FileStream(ToolAssembly, FileMode.Open, FileAccess.Read, FileShare.Read)
+            : null;
 
         fixture.Run().AssertSuccess();
 
+        Assert.Equal(toolHash, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(ToolAssembly))));
         Assert.Equal(fixture.ManifestJson, File.ReadAllText(fixture.LockPath));
         string log = File.ReadAllText(fixture.GhLog);
         Assert.Contains("releases/tags/v1.0.0", log, StringComparison.Ordinal);

@@ -47,7 +47,7 @@ public sealed class PackModScriptTests
     {
         using Fixture fixture = new();
         fixture.Build().AssertSuccess();
-        string pdb = Path.Combine(fixture.Repository, "src", "Fixture", "bin", "Release", "net8.0", "FarmTogether2.ScriptFixture.pdb");
+        string pdb = Path.Combine(fixture.Repository, "src", "Fixture", "bin", "Release", "net10.0", "FarmTogether2.ScriptFixture.pdb");
         File.Delete(pdb);
 
         fixture.Pack().AssertFailure("PDB");
@@ -102,7 +102,7 @@ public sealed class PackModScriptTests
             File.WriteAllText(Path.Combine(projectDirectory, "Fixture.csproj"), """
                 <Project Sdk="Microsoft.NET.Sdk">
                   <PropertyGroup>
-                    <TargetFramework>net8.0</TargetFramework>
+                    <TargetFramework>net10.0</TargetFramework>
                     <AssemblyName>FarmTogether2.ScriptFixture</AssemblyName>
                     <Version>1.0.0</Version>
                     <DebugType>portable</DebugType>

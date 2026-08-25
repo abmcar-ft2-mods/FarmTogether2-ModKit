@@ -222,7 +222,7 @@ try {
     Invoke-DotNet (@('build',$pluginProject,'-c',$Configuration,'--no-restore') + $commonProperties + '-p:DeployToGame=false') 'Plugin build'
     foreach ($project in $testProjects) {
         Invoke-DotNet (@('build',$project,'-c',$Configuration,'--no-restore') + $commonProperties + '-p:DeployToGame=false') 'Test project build'
-        Invoke-DotNet (@('test',$project,'-c',$Configuration,'--no-build','--no-restore') + $commonProperties + '-p:DeployToGame=false') 'Test project tests'
+        Invoke-DotNet (@('test','--project',$project,'-c',$Configuration,'--no-build','--no-restore') + $commonProperties + '-p:DeployToGame=false') 'Test project tests'
     }
     foreach ($guard in $guards) {
         & pwsh -NoLogo -NoProfile -File $guard

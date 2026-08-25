@@ -21,7 +21,7 @@ public sealed class VerifiedReleasePublisherTests
         "FarmTogether2.ModKit.Tool",
         "bin",
         TestBuildConfiguration.Current,
-        "net8.0",
+        "net10.0",
         "FarmTogether2.ModKit.Tool.dll");
 
     [Fact]

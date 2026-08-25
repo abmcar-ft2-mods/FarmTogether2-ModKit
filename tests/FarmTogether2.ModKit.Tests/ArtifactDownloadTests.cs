@@ -874,7 +874,7 @@ public sealed class ArtifactDownloadTests
             using X509Certificate2 generatedCertificate = certificateRequest.CreateSelfSigned(
                 DateTimeOffset.UtcNow.AddDays(-1),
                 DateTimeOffset.UtcNow.AddDays(1));
-            _certificate = new X509Certificate2(
+            _certificate = X509CertificateLoader.LoadPkcs12(
                 generatedCertificate.Export(X509ContentType.Pfx),
                 string.Empty,
                 X509KeyStorageFlags.UserKeySet);

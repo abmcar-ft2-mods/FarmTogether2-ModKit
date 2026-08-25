@@ -161,7 +161,6 @@ jobs:
       - name: Set up locked .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
-          dotnet-version: 8.0.x
           global-json-file: global.json
       - name: Assert exact .NET SDK
         shell: pwsh
@@ -256,7 +255,6 @@ jobs:
       - name: Set up locked .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
-          dotnet-version: 8.0.x
           global-json-file: global.json
       - name: Assert exact .NET SDK
         shell: pwsh
@@ -274,7 +272,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Test restore failed with exit code $LASTEXITCODE." }
           & dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror
           if ($LASTEXITCODE -ne 0) { throw "Test build failed with exit code $LASTEXITCODE." }
-          & dotnet test 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj' -c Release --no-build --no-restore --filter $env:TEST_FILTER
+          & dotnet test --project 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj' -c Release --no-build --no-restore --filter $env:TEST_FILTER
           if ($LASTEXITCODE -ne 0) { throw "Test shard failed with exit code $LASTEXITCODE." }
 
   publish:
@@ -307,7 +305,6 @@ jobs:
       - name: Set up locked .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
-          dotnet-version: 8.0.x
           global-json-file: global.json
       - name: Assert exact .NET SDK
         shell: pwsh

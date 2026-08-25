@@ -188,7 +188,7 @@ public sealed class RepositoryGeneratorTests
         File.WriteAllText(consumer, """
             <Project Sdk="Microsoft.NET.Sdk">
               <PropertyGroup>
-                <TargetFramework>net8.0</TargetFramework>
+                <TargetFramework>net10.0</TargetFramework>
               </PropertyGroup>
               <ItemGroup>
                 <PackageReference Include="FarmTogether2.GameApi.Ref" Version="1.0.0" />
@@ -244,7 +244,7 @@ public sealed class RepositoryGeneratorTests
         File.WriteAllText(project, """
             <Project Sdk="Microsoft.NET.Sdk">
               <PropertyGroup>
-                <TargetFramework>net8.0</TargetFramework>
+                <TargetFramework>net10.0</TargetFramework>
                 <IsFarmTogether2Plugin>true</IsFarmTogether2Plugin>
               </PropertyGroup>
             </Project>
@@ -271,7 +271,7 @@ public sealed class RepositoryGeneratorTests
         {
             JsonElement lockedReference = lockDocument.RootElement
                 .GetProperty("dependencies")
-                .GetProperty("net8.0")
+                .GetProperty("net10.0")
                 .GetProperty("FarmTogether2.GameApi.Ref");
             Assert.Equal("Direct", lockedReference.GetProperty("type").GetString());
             Assert.Equal("1.0.0", lockedReference.GetProperty("resolved").GetString());
@@ -382,7 +382,7 @@ public sealed class RepositoryGeneratorTests
             File.WriteAllText(project, $$"""
                 <Project Sdk="Microsoft.NET.Sdk">
                   <PropertyGroup>
-                    <TargetFramework>net8.0</TargetFramework>
+                    <TargetFramework>net10.0</TargetFramework>
                     <PackageId>{{packageId}}</PackageId>
                     <Version>1.0.0</Version>
                     <AssemblyName>{{packageId}}</AssemblyName>

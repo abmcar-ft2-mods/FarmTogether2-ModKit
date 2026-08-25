@@ -89,9 +89,10 @@ public sealed class InvokeModBuildTests
             Assert.Contains($"--packages {fixture.PackageCache}", line, StringComparison.Ordinal);
             Assert.Contains("--no-cache", line, StringComparison.Ordinal);
         });
-        Assert.Equal(2, commands.Count(line => line.StartsWith("test ", StringComparison.Ordinal)));
-        Assert.Contains(commands, line => line.Contains("Fixture.Tests.csproj", StringComparison.Ordinal));
-        Assert.Contains(commands, line => line.Contains("Fixture.Second.Tests.csproj", StringComparison.Ordinal));
+        string[] testCommands = commands.Where(line => line.StartsWith("test --project ", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(2, testCommands.Length);
+        Assert.Contains(testCommands, line => line.Contains("Fixture.Tests.csproj", StringComparison.Ordinal));
+        Assert.Contains(testCommands, line => line.Contains("Fixture.Second.Tests.csproj", StringComparison.Ordinal));
         Assert.Equal("guard\nguard-two\n", File.ReadAllText(fixture.GuardLog).Replace("\r\n", "\n", StringComparison.Ordinal));
     }
 

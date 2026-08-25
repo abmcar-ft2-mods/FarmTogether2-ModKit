@@ -29,6 +29,7 @@ public sealed class WorkflowContractTests
     {
         { CiPath, Checkout, "actions/checkout@main", "movable official action" },
         { CiPath, "runs-on: windows-2025", "runs-on: windows-latest", "mutable runner" },
+        // Intentionally reintroduce the retired .NET 8 auxiliary SDK to prove the workflow contract rejects it.
         { CiPath, "          global-json-file: global.json", "          dotnet-version: 8.0.x\n          global-json-file: global.json", "redundant auxiliary SDK download" },
         { ReferenceReleasePath, "          global-json-file: global.json", "          dotnet-version: 8.0.x\n          global-json-file: global.json", "redundant release SDK download" },
         { CiPath, "global-json-file: global.json", "global-json-file: missing.json", "different global.json" },
@@ -116,12 +117,12 @@ public sealed class WorkflowContractTests
         { ReferenceReleasePath, "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5&ReleaseShard!=6", "filter: ReleaseShard!=1&ReleaseShard!=2&ReleaseShard!=3&ReleaseShard!=4&ReleaseShard!=5", "release remainder overlaps a shard" },
         { ReferenceReleasePath, "--filter $env:TEST_FILTER", "--filter 'Category!=LongRunning'", "release skipped long-running tests" },
         { ReferenceReleasePath, "    timeout-minutes: 30", "    timeout-minutes: 31", "release job timeout weakened" },
-        { ReferenceReleasePath, "          dotnet-version: 8.0.x\n          global-json-file: global.json", "          global-json-file: global.json", "release job lacks .NET 8 runtime" },
+        { ReferenceReleasePath, "      - name: Set up locked .NET SDK\n        uses: " + SetupDotNet + "\n        with:\n          global-json-file: global.json\n", "", "release job lacks locked SDK" },
         { ReferenceReleasePath, "      - name: Receive and validate frozen reference candidate again\n        shell: pwsh\n        env:\n          GH_TOKEN: ${{ github.token }}\n          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}", "      - name: Receive and validate frozen reference candidate again\n        shell: pwsh\n        env:\n          GH_TOKEN: ${{ github.token }}\n          EXPECTED_COMMIT: 2222222222222222222222222222222222222222", "reference publish receiver uses hardcoded commit" },
         { CiPath, "dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", "dotnet restore 'FarmTogether2-ModKit.sln'", "unlocked restore" },
         { CiPath, "-warnaserror", "", "warnings not errors" },
         { CiPath, "--filter 'Category!=LongRunning'", "--filter 'Category=LongRunning'", "long-running tests required on every change" },
-        { CiPath, "dotnet 'tools/FarmTogether2.ModKit.Tool/bin/Release/net8.0/FarmTogether2.ModKit.Tool.dll'", "dotnet run --project 'tools/FarmTogether2.ModKit.Tool/FarmTogether2.ModKit.Tool.csproj'", "CI restarts MSBuild to inspect the package" },
+        { CiPath, "dotnet 'tools/FarmTogether2.ModKit.Tool/bin/Release/net10.0/FarmTogether2.ModKit.Tool.dll'", "dotnet run --project 'tools/FarmTogether2.ModKit.Tool/FarmTogether2.ModKit.Tool.csproj'", "CI restarts MSBuild to inspect the package" },
         { CiPath, "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'", "          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n          if ($LASTEXITCODE -ne 0) { throw 'Caller workflow validation failed.' }", "PowerShell caller validation checked an undefined native exit code" },
         { CiPath, "      - name: Validate generated caller workflows\n        shell: pwsh", "      - name: Validate generated caller workflows\n        shell: bash", "caller workflow validation shell" },
         { CiPath, "      - name: Check repository diff and leakage policy", "      - name: Duplicate caller workflow validation\n        shell: pwsh\n        run: |\n          & 'tests/WorkflowContract.Tests/Test-CallerWorkflows.ps1' `\n            -RepositoryRoot 'tests/fixtures/mod-repository'\n      - name: Check repository diff and leakage policy", "duplicate caller workflow validation" },
@@ -228,8 +229,8 @@ public sealed class WorkflowContractTests
             .Select((step, index) => AsMapping(step, $"{CiPath} verify step {index}"))
             .Where(step => OptionalScalar(step, "name") == "Validate generated caller workflows")
             .ToArray();
-        Assert.Single(steps);
-        string script = Scalar(steps[0], "run", CiPath);
+        YamlMappingNode step = Assert.Single(steps);
+        string script = Scalar(step, "run", CiPath);
 
         ProcessStartInfo startInfo = new("pwsh")
         {
@@ -335,11 +336,7 @@ public sealed class WorkflowContractTests
                 YamlMappingNode job = AsMapping(jobValue, $"{path} job {jobName}");
                 Require(Scalar(job, "runs-on", path) == "windows-2025", $"{path} job {jobName} must use windows-2025.");
                 bool requiresSdk = path != ReferenceReleasePath || jobName != "prepare";
-                bool installAuxiliarySdk =
-                    path == BuildPath ||
-                    path == PublishPath ||
-                    (path == ReferenceReleasePath && jobName != "prepare");
-                ValidateSdkAndGhSteps(job, $"{path} job {jobName}", requiresSdk, installAuxiliarySdk);
+                ValidateSdkAndGhSteps(job, $"{path} job {jobName}", requiresSdk);
                 ValidateCheckoutTokens(job, $"{path} job {jobName}");
             }
         }
@@ -364,8 +361,7 @@ public sealed class WorkflowContractTests
     private static void ValidateSdkAndGhSteps(
         YamlMappingNode job,
         string label,
-        bool requiresSdk,
-        bool installAuxiliarySdk)
+        bool requiresSdk)
     {
         YamlSequenceNode steps = Sequence(job, "steps", label);
         int setupIndex = -1;
@@ -381,16 +377,8 @@ public sealed class WorkflowContractTests
                 YamlMappingNode with = Mapping(step, "with", label);
                 Require(Scalar(with, "global-json-file", label) == "global.json",
                     $"{label} setup-dotnet must use global.json.");
-                if (installAuxiliarySdk)
-                {
-                    Require(with.Children.Count == 2 && Scalar(with, "dotnet-version", label) == "8.0.x",
-                        $"{label} setup-dotnet must install .NET 8 target packs.");
-                }
-                else
-                {
-                    Require(with.Children.Count == 1,
-                        $"{label} setup-dotnet must not download a redundant auxiliary SDK.");
-                }
+                Require(with.Children.Count == 1,
+                    $"{label} setup-dotnet must not download a redundant auxiliary SDK.");
             }
             if (run is not null &&
                 (Regex.IsMatch(run, @"(?i)\bgh\s") || run.Contains("Resolve-ModKit.ps1", StringComparison.Ordinal) ||
@@ -526,9 +514,9 @@ public sealed class WorkflowContractTests
         string verifyScripts = JoinScripts(verify, "CI verify");
         Require(verifyScripts.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal), "CI restore must be locked.");
         Require(verifyScripts.Contains("-warnaserror", StringComparison.Ordinal), "CI build must treat warnings as errors.");
-        Require(verifyScripts.Contains("dotnet test 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", StringComparison.Ordinal),
+        Require(verifyScripts.Contains("dotnet test --project 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj' -c Release --no-build --no-restore --filter 'Category!=LongRunning'", StringComparison.Ordinal),
             "CI must run the required test profile.");
-        Require(verifyScripts.Contains("dotnet 'tools/FarmTogether2.ModKit.Tool/bin/Release/net8.0/FarmTogether2.ModKit.Tool.dll'", StringComparison.Ordinal) &&
+        Require(verifyScripts.Contains("dotnet 'tools/FarmTogether2.ModKit.Tool/bin/Release/net10.0/FarmTogether2.ModKit.Tool.dll'", StringComparison.Ordinal) &&
                 !Regex.IsMatch(verifyScripts, @"(?i)\bdotnet\s+run\b", RegexOptions.CultureInvariant),
             "CI must inspect the reference package with the already-built tool.");
         Require(verifyScripts.Contains("scripts/Pack-GameApiRef.ps1", StringComparison.Ordinal) &&
@@ -782,7 +770,7 @@ public sealed class WorkflowContractTests
         string script = Scalar(testStep, "run", label);
         Require(script.Contains("dotnet restore 'FarmTogether2-ModKit.sln' --locked-mode", StringComparison.Ordinal) &&
                 script.Contains("dotnet build 'FarmTogether2-ModKit.sln' -c Release --no-restore -warnaserror", StringComparison.Ordinal) &&
-                script.Contains("dotnet test 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj'", StringComparison.Ordinal) &&
+                script.Contains("dotnet test --project 'tests/FarmTogether2.ModKit.Tests/FarmTogether2.ModKit.Tests.csproj'", StringComparison.Ordinal) &&
                 Regex.Matches(script, @"(?i)\bdotnet\s+test\b", RegexOptions.CultureInvariant).Count == 1 &&
                 script.Contains("--filter $env:TEST_FILTER", StringComparison.Ordinal) &&
                 !script.Contains("Category!=LongRunning", StringComparison.Ordinal),

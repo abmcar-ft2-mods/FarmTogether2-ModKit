@@ -169,7 +169,7 @@ public sealed class ModKitVersionTests
             File.Copy(PackageScript, Path.Combine(DirectoryPath, "scripts", "Pack-GameApiRef.ps1"));
             File.WriteAllText(
                 RefProjectPath,
-                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net8.0</TargetFramework>\n    <Version>1.0.0</Version>\n  </PropertyGroup>\n</Project>\n",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    <Version>1.0.0</Version>\n  </PropertyGroup>\n</Project>\n",
                 new UTF8Encoding(false));
             File.WriteAllText(
                 StubProjectPath,

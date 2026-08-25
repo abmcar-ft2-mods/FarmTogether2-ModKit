@@ -18,7 +18,7 @@ public sealed class CandidateArtifactTests
         "FarmTogether2.ModKit.Tool",
         "bin",
         TestBuildConfiguration.Current,
-        "net8.0",
+        "net10.0",
         "FarmTogether2.ModKit.Tool.dll");
     private static readonly string CandidateScript = Path.Combine(Root, "scripts", "Test-Candidate.ps1");
     private static readonly string PublishedScript = Path.Combine(Root, "scripts", "Test-PublishedAssets.ps1");

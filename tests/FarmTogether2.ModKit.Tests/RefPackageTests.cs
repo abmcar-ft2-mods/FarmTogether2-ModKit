@@ -20,7 +20,7 @@ public sealed class RefPackageTests
         "FarmTogether2.ModKit.Tool",
         "bin",
         TestBuildConfiguration.Current,
-        "net8.0",
+        "net10.0",
         "FarmTogether2.ModKit.Tool.dll");
     private static readonly IReadOnlyDictionary<string, Version> Assemblies =
         new Dictionary<string, Version>(StringComparer.Ordinal)
@@ -215,7 +215,7 @@ public sealed class RefPackageTests
             """
             <Project Sdk="Microsoft.NET.Sdk">
               <PropertyGroup>
-                <TargetFramework>net8.0</TargetFramework>
+                <TargetFramework>net10.0</TargetFramework>
                 <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
               </PropertyGroup>
               <ItemGroup>

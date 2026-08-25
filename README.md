@@ -16,6 +16,12 @@ The reference package models these assembly identities:
 
 This project is an independent community project. It is not affiliated with, endorsed by, or supported by Milkstone Studios.
 
+## Build requirements
+
+Repository-owned tooling, tests, contract models, and reference-package orchestration target .NET 10 and use the exact .NET SDK version pinned in `global.json` (currently 10.0.400). The generated mod repository uses the same SDK pin.
+
+Game-facing plugin projects, compile-time stubs, and packaged reference assemblies intentionally remain `net6.0` so they match the BepInEx IL2CPP mod runtime; they are not host tooling and must not be retargeted to .NET 10.
+
 ## Private repository setup
 
 The generated caller workflows expect the ModKit and mod repositories to remain private. Before enabling CI for a generated mod repository:

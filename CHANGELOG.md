@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3 - 2026-08-25
+
+- Move ModKit host tooling and tests to .NET 10 while keeping game-facing stubs and packaged reference assemblies on `net6.0`.
+- Update the test infrastructure to `Microsoft.NET.Test.Sdk` 18.9.0 and `xunit.runner.visualstudio` 4.0.0.
+- Keep reusable workflows aligned with the exact SDK selected by `global.json`.
+
 ## 1.0.2 - 2026-07-15
 
 - Mark AutoModRange and FarmhandSpeed as compatible with Steam build `24069957` after matching its captured interop contract.

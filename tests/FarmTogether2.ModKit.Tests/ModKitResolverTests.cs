@@ -21,7 +21,7 @@ public sealed class ModKitResolverTests
         "FarmTogether2.ModKit.Tool",
         "bin",
         TestBuildConfiguration.Current,
-        "net8.0",
+        "net10.0",
         "FarmTogether2.ModKit.Tool.dll");
     private static readonly IReadOnlyDictionary<string, Version> Assemblies =
         new Dictionary<string, Version>(StringComparer.Ordinal)

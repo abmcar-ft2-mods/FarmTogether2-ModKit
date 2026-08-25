@@ -13,7 +13,7 @@ public sealed class LockResolverTests
         "FarmTogether2.ModKit.Tool",
         "bin",
         TestBuildConfiguration.Current,
-        "net8.0",
+        "net10.0",
         "FarmTogether2.ModKit.Tool.dll");
     private const string Commit = "0123456789abcdef0123456789abcdef01234567";
     private const string Hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
